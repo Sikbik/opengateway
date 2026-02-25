@@ -111,7 +111,9 @@ struct SetupArgs {
     start_timeout: f64,
     #[arg(long)]
     headless: bool,
-    #[arg(long)]
+    #[arg(long, help = "Open the OAuth URL in your default browser")]
+    open_browser: bool,
+    #[arg(long, hide = true)]
     no_browser: bool,
     #[arg(long)]
     relogin: bool,
@@ -249,7 +251,9 @@ struct LoginArgs {
     backend_host: String,
     #[arg(long, default_value_t = DEFAULT_BACKEND_PORT)]
     backend_port: u16,
-    #[arg(long)]
+    #[arg(long, help = "Open the OAuth URL in your default browser")]
+    open_browser: bool,
+    #[arg(long, hide = true)]
     no_browser: bool,
     #[arg(long)]
     no_auto_install: bool,
@@ -423,6 +427,7 @@ fn command_setup(args: SetupArgs) -> Result<()> {
             config: Some(config_path.clone()),
             backend_host: args.backend_host.clone(),
             backend_port: args.backend_port,
+            open_browser: args.open_browser,
             no_browser: args.no_browser,
             no_auto_install: false,
             verbose: args.verbose,
@@ -736,7 +741,9 @@ fn command_login(args: LoginArgs) -> Result<()> {
         LoginModeArg::Headless => LoginMode::Headless,
     };
 
-    let login_result = oauth::login(mode, args.no_browser, args.verbose)?;
+    let should_open_browser = args.open_browser && !args.no_browser;
+
+    let login_result = oauth::login(mode, !should_open_browser, args.verbose)?;
     auth_store.upsert_openai(NewCredential {
         refresh_token: login_result.refresh_token,
         access_token: login_result.access_token,
