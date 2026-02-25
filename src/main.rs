@@ -1157,7 +1157,7 @@ fn merge_factory_config(
     Ok((added, updated, backup))
 }
 
-fn expand_user_path(path: &PathBuf) -> PathBuf {
+fn expand_user_path(path: &Path) -> PathBuf {
     let raw = path.to_string_lossy();
     if raw == "~" {
         return std::env::var("HOME")

@@ -133,6 +133,7 @@ impl AuthStore {
             .read(true)
             .write(true)
             .create(true)
+            .truncate(false)
             .open(&self.path)
             .with_context(|| format!("failed to open auth store {}", self.path.display()))?;
 

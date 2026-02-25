@@ -430,20 +430,17 @@ fn open_browser(url: &str) -> Result<()> {
         }
     }
 
-    if cfg!(target_os = "macos") {
-        if Command::new("open").arg(url).status().is_ok() {
-            return Ok(());
-        }
+    if cfg!(target_os = "macos") && Command::new("open").arg(url).status().is_ok() {
+        return Ok(());
     }
 
-    if cfg!(target_os = "windows") {
-        if Command::new("cmd")
+    if cfg!(target_os = "windows")
+        && Command::new("cmd")
             .args(["/C", "start", "", url])
             .status()
             .is_ok()
-        {
-            return Ok(());
-        }
+    {
+        return Ok(());
     }
 
     bail!("no supported browser launcher found")
@@ -481,7 +478,7 @@ fn extract_account_id_from_jwt(token: &str) -> Option<String> {
 fn decode_base64url(payload: &str) -> Option<Vec<u8>> {
     URL_SAFE_NO_PAD.decode(payload).ok().or_else(|| {
         let mut padded = payload.to_string();
-        while padded.len() % 4 != 0 {
+        while !padded.len().is_multiple_of(4) {
             padded.push('=');
         }
         URL_SAFE.decode(padded.as_bytes()).ok()
