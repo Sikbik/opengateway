@@ -1,0 +1,19 @@
+# Rust build artifacts
+/target/
+
+# IDE/editor files
+.idea/
+.vscode/
+
+# Environment and local overrides
+.env
+.env.*
+
+# Logs and process artifacts
+*.log
+*.pid
+*.tmp
+
+# OS files
+.DS_Store
+

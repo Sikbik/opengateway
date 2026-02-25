@@ -1,0 +1,39 @@
+{
+  "custom_models": [
+    {
+      "model_display_name": "GPT-5.3 Codex (High)",
+      "model": "gpt-5.3-codex(high)",
+      "base_url": "http://localhost:42069/v1",
+      "api_key": "placeholder",
+      "provider": "openai"
+    },
+    {
+      "model_display_name": "GPT-5.3 Codex (XHigh)",
+      "model": "gpt-5.3-codex(xhigh)",
+      "base_url": "http://localhost:42069/v1",
+      "api_key": "placeholder",
+      "provider": "openai"
+    },
+    {
+      "model_display_name": "GPT-5.2 Codex",
+      "model": "gpt-5.2-codex",
+      "base_url": "http://localhost:42069/v1",
+      "api_key": "placeholder",
+      "provider": "openai"
+    },
+    {
+      "model_display_name": "GPT-5.2 Codex (High)",
+      "model": "gpt-5.2-codex(high)",
+      "base_url": "http://localhost:42069/v1",
+      "api_key": "placeholder",
+      "provider": "openai"
+    },
+    {
+      "model_display_name": "GPT-5.1 Codex",
+      "model": "gpt-5.1-codex",
+      "base_url": "http://localhost:42069/v1",
+      "api_key": "placeholder",
+      "provider": "openai"
+    }
+  ]
+}

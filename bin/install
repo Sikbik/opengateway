@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+INSTALL_DIR="${OPENGATEWAY_INSTALL_DIR:-$HOME/.local/bin}"
+TARGET_BIN="${INSTALL_DIR}/opengateway"
+
+if ! command -v cargo >/dev/null 2>&1; then
+  echo "error: cargo is required but was not found on PATH" >&2
+  echo "install Rust from https://rustup.rs and retry" >&2
+  exit 1
+fi
+
+mkdir -p "$INSTALL_DIR"
+
+echo "Building opengateway (release)..."
+cargo build --release --manifest-path "${ROOT_DIR}/Cargo.toml"
+
+install -m 755 "${ROOT_DIR}/target/release/opengateway" "$TARGET_BIN"
+
+echo "Installed: $TARGET_BIN"
+if [[ ":$PATH:" != *":$INSTALL_DIR:"* ]]; then
+  echo ""
+  echo "${INSTALL_DIR} is not on your PATH. Add this to your shell profile:"
+  echo "  export PATH=\"${INSTALL_DIR}:\$PATH\""
+fi
+
+echo ""
+echo "Next steps:"
+echo "  opengateway setup"
+echo "  opengateway self-test"

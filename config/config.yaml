@@ -1,0 +1,24 @@
+# Backend port used by opengateway.
+port: 42069
+
+# Bind backend to localhost for security.
+host: "127.0.0.1"
+
+# Store OAuth credential files in this directory.
+auth-dir: "~/.config/opengateway/auth"
+
+debug: false
+logging-to-file: false
+usage-statistics-enabled: true
+proxy-url: ""
+request-retry: 3
+request-timeout: "10m"
+
+quota-exceeded:
+  switch-project: true
+  switch-preview-model: true
+
+# Management API disabled by default.
+remote-management:
+  allow-remote: false
+  secret-key: ""
