@@ -3,7 +3,7 @@ use crate::oauth;
 use anyhow::{anyhow, Context, Result};
 use reqwest::blocking::Client;
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::{Arc, Condvar, Mutex};
@@ -13,6 +13,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 const MAX_HEADER_BYTES: usize = 64 * 1024;
 const REFRESH_SKEW_MS: i64 = 5 * 60 * 1000;
 const UPSTREAM_RESPONSES_ENDPOINT: &str = "https://chatgpt.com/backend-api/codex/responses";
+const DEFAULT_INSTRUCTIONS: &str = "You are a helpful assistant.";
 const RETRY_AFTER_SECONDS: u64 = 1;
 const RATE_LIMITER_ENTRY_TTL: Duration = Duration::from_secs(15 * 60);
 const RATE_LIMITER_CLEANUP_INTERVAL: Duration = Duration::from_secs(60);
@@ -655,12 +656,119 @@ fn normalize_model_alias_in_request_body(body: Vec<u8>) -> Vec<u8> {
     let Some(payload_object) = payload.as_object_mut() else {
         return body;
     };
+
+    normalize_model_alias_and_reasoning(payload_object);
+    normalize_tool_shapes(payload_object);
+    convert_messages_into_input(payload_object);
+    normalize_input_shape(payload_object);
+    ensure_instructions(payload_object);
+    strip_unsupported_fields(payload_object);
+
+    payload_object.insert("store".to_string(), Value::Bool(false));
+    payload_object.insert("stream".to_string(), Value::Bool(true));
+
+    serde_json::to_vec(&payload).unwrap_or(body)
+}
+
+fn strip_unsupported_fields(payload_object: &mut serde_json::Map<String, Value>) {
+    payload_object.retain(|key, _| {
+        matches!(
+            key.as_str(),
+            "model"
+                | "instructions"
+                | "input"
+                | "tools"
+                | "tool_choice"
+                | "reasoning"
+                | "parallel_tool_calls"
+                | "text"
+                | "include"
+                | "stream"
+                | "store"
+        )
+    });
+}
+
+fn normalize_tool_shapes(payload_object: &mut serde_json::Map<String, Value>) {
+    if let Some(Value::Array(tools)) = payload_object.get_mut("tools") {
+        for tool in tools {
+            let Some(tool_object) = tool.as_object_mut() else {
+                continue;
+            };
+
+            let Some(function_value) = tool_object.remove("function") else {
+                continue;
+            };
+
+            let Value::Object(function_object) = function_value else {
+                continue;
+            };
+
+            if !tool_object.contains_key("name") {
+                if let Some(name) = function_object.get("name").and_then(Value::as_str) {
+                    tool_object.insert("name".to_string(), Value::String(name.to_string()));
+                }
+            }
+
+            if !tool_object.contains_key("description") {
+                if let Some(description) =
+                    function_object.get("description").and_then(Value::as_str)
+                {
+                    tool_object.insert(
+                        "description".to_string(),
+                        Value::String(description.to_string()),
+                    );
+                }
+            }
+
+            if !tool_object.contains_key("parameters") {
+                if let Some(parameters) = function_object.get("parameters") {
+                    tool_object.insert("parameters".to_string(), parameters.clone());
+                }
+            }
+
+            if !tool_object.contains_key("strict") {
+                if let Some(strict) = function_object.get("strict") {
+                    tool_object.insert("strict".to_string(), strict.clone());
+                }
+            }
+        }
+    }
+
+    let Some(tool_choice) = payload_object.get_mut("tool_choice") else {
+        return;
+    };
+
+    let Some(choice_object) = tool_choice.as_object_mut() else {
+        return;
+    };
+
+    let Some(function_value) = choice_object.remove("function") else {
+        return;
+    };
+
+    let Value::Object(function_object) = function_value else {
+        return;
+    };
+
+    if !choice_object.contains_key("name") {
+        if let Some(name) = function_object.get("name").and_then(Value::as_str) {
+            choice_object.insert("name".to_string(), Value::String(name.to_string()));
+        }
+    }
+
+    if !choice_object.contains_key("type") {
+        choice_object.insert("type".to_string(), Value::String("function".to_string()));
+    }
+}
+
+fn normalize_model_alias_and_reasoning(payload_object: &mut serde_json::Map<String, Value>) {
     let Some(model_id) = payload_object.get("model").and_then(Value::as_str) else {
-        return body;
+        return;
     };
 
     let Some((canonical_model, effort)) = parse_model_effort_alias(model_id) else {
-        return body;
+        return;
     };
 
     payload_object.insert("model".to_string(), Value::String(canonical_model));
@@ -672,22 +780,357 @@ fn normalize_model_alias_in_request_body(body: Vec<u8>) -> Vec<u8> {
         .and_then(Value::as_str)
         .is_some();
 
-    if !already_has_effort {
-        match payload_object.get_mut("reasoning") {
-            Some(existing_reasoning) if existing_reasoning.is_object() => {
-                if let Some(reasoning) = existing_reasoning.as_object_mut() {
-                    reasoning.insert("effort".to_string(), Value::String(effort));
+    if already_has_effort {
+        return;
+    }
+
+    match payload_object.get_mut("reasoning") {
+        Some(existing_reasoning) if existing_reasoning.is_object() => {
+            if let Some(reasoning) = existing_reasoning.as_object_mut() {
+                reasoning.insert("effort".to_string(), Value::String(effort));
+            }
+        }
+        _ => {
+            let mut reasoning = serde_json::Map::new();
+            reasoning.insert("effort".to_string(), Value::String(effort));
+            payload_object.insert("reasoning".to_string(), Value::Object(reasoning));
+        }
+    }
+}
+
+fn convert_messages_into_input(payload_object: &mut serde_json::Map<String, Value>) {
+    let Some(messages_value) = payload_object.remove("messages") else {
+        return;
+    };
+
+    let Some(messages) = messages_value.as_array() else {
+        return;
+    };
+
+    let had_input = payload_object.contains_key("input");
+    let mut input_items = Vec::new();
+    let mut instruction_blocks = Vec::new();
+    let mut known_tool_call_ids = HashSet::new();
+
+    for message in messages {
+        let Some(message_object) = message.as_object() else {
+            continue;
+        };
+
+        let role = message_object
+            .get("role")
+            .and_then(Value::as_str)
+            .unwrap_or("user");
+
+        if role == "system" {
+            let instruction_text = message_object
+                .get("content")
+                .map(collect_text_from_value)
+                .unwrap_or_default();
+            if !instruction_text.is_empty() {
+                instruction_blocks.push(instruction_text);
+            }
+            continue;
+        }
+
+        if had_input {
+            continue;
+        }
+
+        if role == "assistant" {
+            let function_calls = convert_assistant_tool_calls_to_input_items(message_object);
+            for function_call in &function_calls {
+                if let Some(call_id) = function_call.get("call_id").and_then(Value::as_str) {
+                    if !call_id.is_empty() {
+                        known_tool_call_ids.insert(call_id.to_string());
+                    }
                 }
             }
-            _ => {
-                let mut reasoning = serde_json::Map::new();
-                reasoning.insert("effort".to_string(), Value::String(effort));
-                payload_object.insert("reasoning".to_string(), Value::Object(reasoning));
+            input_items.extend(function_calls);
+        }
+
+        if role == "tool" {
+            if let Some((call_id, tool_output_item)) =
+                convert_tool_message_to_input_item(message_object)
+            {
+                if known_tool_call_ids.contains(&call_id) {
+                    input_items.push(tool_output_item);
+                }
             }
+            continue;
+        }
+
+        let content = message_object
+            .get("content")
+            .cloned()
+            .unwrap_or(Value::Null);
+        let normalized_content = normalize_message_content_for_role(content, role);
+        if normalized_content.is_empty() {
+            continue;
+        }
+
+        let mut normalized_message = serde_json::Map::new();
+        normalized_message.insert(
+            "role".to_string(),
+            Value::String(normalize_message_role(role).to_string()),
+        );
+        normalized_message.insert("content".to_string(), Value::Array(normalized_content));
+        input_items.push(Value::Object(normalized_message));
+    }
+
+    if !had_input && !input_items.is_empty() {
+        payload_object.insert("input".to_string(), Value::Array(input_items));
+    }
+
+    if is_missing_or_empty_instructions(payload_object) && !instruction_blocks.is_empty() {
+        payload_object.insert(
+            "instructions".to_string(),
+            Value::String(instruction_blocks.join("\n\n")),
+        );
+    }
+}
+
+fn normalize_input_shape(payload_object: &mut serde_json::Map<String, Value>) {
+    let Some(input_value) = payload_object.remove("input") else {
+        return;
+    };
+
+    let normalized_input = match input_value {
+        Value::String(text) => Value::Array(vec![build_text_message("user", text)]),
+        Value::Array(items) => Value::Array(
+            items
+                .into_iter()
+                .map(normalize_input_item)
+                .collect::<Vec<_>>(),
+        ),
+        Value::Object(object) => Value::Array(vec![normalize_input_item(Value::Object(object))]),
+        other => other,
+    };
+
+    payload_object.insert("input".to_string(), normalized_input);
+}
+
+fn normalize_input_item(item: Value) -> Value {
+    match item {
+        Value::String(text) => build_text_message("user", text),
+        Value::Object(mut object) => {
+            if object.get("type").and_then(Value::as_str).is_some() && !object.contains_key("role")
+            {
+                return Value::Object(object);
+            }
+
+            let role = object
+                .get("role")
+                .and_then(Value::as_str)
+                .unwrap_or("user")
+                .to_string();
+            let content_value = object
+                .remove("content")
+                .or_else(|| object.remove("text"))
+                .unwrap_or(Value::Null);
+
+            object.insert(
+                "content".to_string(),
+                Value::Array(normalize_message_content_for_role(content_value, &role)),
+            );
+
+            object.insert(
+                "role".to_string(),
+                Value::String(normalize_message_role(&role).to_string()),
+            );
+
+            Value::Object(object)
+        }
+        other => other,
+    }
+}
+
+fn normalize_message_content_for_role(content: Value, role: &str) -> Vec<Value> {
+    let default_text_type = default_content_text_type(role);
+    match content {
+        Value::String(text) => vec![json!({"type": default_text_type, "text": text})],
+        Value::Array(parts) => parts
+            .into_iter()
+            .flat_map(|part| normalize_content_part(part, default_text_type))
+            .collect::<Vec<_>>(),
+        Value::Object(part) => normalize_content_part(Value::Object(part), default_text_type),
+        Value::Null => Vec::new(),
+        other => vec![json!({"type": default_text_type, "text": other.to_string()})],
+    }
+}
+
+fn normalize_content_part(part: Value, default_text_type: &str) -> Vec<Value> {
+    match part {
+        Value::String(text) => vec![json!({"type": default_text_type, "text": text})],
+        Value::Object(mut object) => {
+            let part_type = object
+                .get("type")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+
+            if part_type == default_text_type || part_type == "refusal" {
+                return vec![Value::Object(object)];
+            }
+
+            if matches!(part_type, "" | "text" | "input_text" | "output_text") {
+                if let Some(text) = object
+                    .remove("text")
+                    .and_then(|value| value.as_str().map(str::to_string))
+                {
+                    return vec![json!({"type": default_text_type, "text": text})];
+                }
+                if let Some(text) = object
+                    .remove("content")
+                    .and_then(|value| value.as_str().map(str::to_string))
+                {
+                    return vec![json!({"type": default_text_type, "text": text})];
+                }
+            }
+
+            vec![Value::Object(object)]
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn normalize_message_role(role: &str) -> &str {
+    match role {
+        "assistant" => "assistant",
+        "developer" => "developer",
+        "user" => "user",
+        _ => "user",
+    }
+}
+
+fn default_content_text_type(role: &str) -> &str {
+    if role == "assistant" {
+        "output_text"
+    } else {
+        "input_text"
+    }
+}
+
+fn convert_assistant_tool_calls_to_input_items(
+    message_object: &serde_json::Map<String, Value>,
+) -> Vec<Value> {
+    let Some(tool_calls) = message_object.get("tool_calls").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+
+    tool_calls
+        .iter()
+        .filter_map(|tool_call| {
+            let tool_call_object = tool_call.as_object()?;
+            let function = tool_call_object.get("function")?.as_object()?;
+            let name = function.get("name")?.as_str()?;
+            let call_id = tool_call_object
+                .get("id")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if call_id.is_empty() {
+                return None;
+            }
+
+            let arguments = function
+                .get("arguments")
+                .map(stringify_json_value)
+                .unwrap_or_else(|| "{}".to_string());
+
+            Some(json!({
+                "type": "function_call",
+                "name": name,
+                "arguments": arguments,
+                "call_id": call_id
+            }))
+        })
+        .collect::<Vec<_>>()
+}
+
+fn convert_tool_message_to_input_item(
+    message_object: &serde_json::Map<String, Value>,
+) -> Option<(String, Value)> {
+    let call_id = message_object.get("tool_call_id")?.as_str()?;
+    let output = message_object
+        .get("content")
+        .map(collect_text_from_value)
+        .unwrap_or_default();
+
+    Some((
+        call_id.to_string(),
+        json!({
+            "type": "function_call_output",
+            "call_id": call_id,
+            "output": output
+        }),
+    ))
+}
+
+fn stringify_json_value(value: &Value) -> String {
+    match value {
+        Value::String(text) => text.to_string(),
+        _ => serde_json::to_string(value).unwrap_or_else(|_| "{}".to_string()),
+    }
+}
+
+fn build_text_message(role: &str, text: String) -> Value {
+    json!({
+        "role": role,
+        "content": [
+            {
+                "type": "input_text",
+                "text": text
+            }
+        ]
+    })
+}
+
+fn ensure_instructions(payload_object: &mut serde_json::Map<String, Value>) {
+    if !is_missing_or_empty_instructions(payload_object) {
+        return;
+    }
+
+    if let Some(system_value) = payload_object.remove("system") {
+        let system_text = collect_text_from_value(&system_value);
+        if !system_text.is_empty() {
+            payload_object.insert("instructions".to_string(), Value::String(system_text));
+            return;
         }
     }
 
-    serde_json::to_vec(&payload).unwrap_or(body)
+    payload_object.insert(
+        "instructions".to_string(),
+        Value::String(DEFAULT_INSTRUCTIONS.to_string()),
+    );
+}
+
+fn is_missing_or_empty_instructions(payload_object: &serde_json::Map<String, Value>) -> bool {
+    match payload_object.get("instructions") {
+        Some(Value::String(value)) => value.trim().is_empty(),
+        Some(_) => true,
+        None => true,
+    }
+}
+
+fn collect_text_from_value(value: &Value) -> String {
+    match value {
+        Value::String(text) => text.trim().to_string(),
+        Value::Array(items) => items
+            .iter()
+            .map(collect_text_from_value)
+            .filter(|value| !value.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n\n"),
+        Value::Object(object) => {
+            if let Some(text) = object.get("text").and_then(Value::as_str) {
+                return text.trim().to_string();
+            }
+            if let Some(content) = object.get("content") {
+                return collect_text_from_value(content);
+            }
+            String::new()
+        }
+        _ => String::new(),
+    }
 }
 
 fn parse_model_effort_alias(model_id: &str) -> Option<(String, String)> {
@@ -934,5 +1377,332 @@ mod tests {
                 .and_then(Value::as_str),
             Some("low")
         );
+    }
+
+    #[test]
+    fn injects_required_codex_defaults() {
+        let body = serde_json::to_vec(&json!({
+            "model": "gpt-5.3-codex",
+            "input": "hello"
+        }))
+        .expect("body serialization should succeed");
+
+        let normalized = normalize_model_alias_in_request_body(body);
+        let payload: Value =
+            serde_json::from_slice(&normalized).expect("normalized payload must be valid json");
+
+        assert_eq!(payload.get("store").and_then(Value::as_bool), Some(false));
+        assert_eq!(payload.get("stream").and_then(Value::as_bool), Some(true));
+        assert_eq!(
+            payload.get("instructions").and_then(Value::as_str),
+            Some(DEFAULT_INSTRUCTIONS)
+        );
+
+        let input = payload
+            .get("input")
+            .and_then(Value::as_array)
+            .expect("input should be normalized into an array");
+        assert_eq!(input.len(), 1);
+        assert_eq!(input[0].get("role").and_then(Value::as_str), Some("user"));
+        assert_eq!(
+            input[0]
+                .get("content")
+                .and_then(Value::as_array)
+                .and_then(|content| content.first())
+                .and_then(|part| part.get("type"))
+                .and_then(Value::as_str),
+            Some("input_text")
+        );
+    }
+
+    #[test]
+    fn converts_chat_messages_into_codex_input() {
+        let body = serde_json::to_vec(&json!({
+            "model": "gpt-5.3-codex",
+            "messages": [
+                {"role": "system", "content": "Follow the repo conventions"},
+                {"role": "user", "content": "Say hi"}
+            ]
+        }))
+        .expect("body serialization should succeed");
+
+        let normalized = normalize_model_alias_in_request_body(body);
+        let payload: Value =
+            serde_json::from_slice(&normalized).expect("normalized payload must be valid json");
+
+        assert!(payload.get("messages").is_none());
+        assert_eq!(
+            payload.get("instructions").and_then(Value::as_str),
+            Some("Follow the repo conventions")
+        );
+        assert_eq!(
+            payload
+                .get("input")
+                .and_then(Value::as_array)
+                .and_then(|items| items.first())
+                .and_then(|item| item.get("role"))
+                .and_then(Value::as_str),
+            Some("user")
+        );
+    }
+
+    #[test]
+    fn normalizes_chat_tools_schema() {
+        let body = serde_json::to_vec(&json!({
+            "model": "gpt-5.3-codex",
+            "messages": [{"role": "user", "content": "Call ping once"}],
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "ping",
+                    "description": "Return pong",
+                    "parameters": {"type": "object", "properties": {}, "additionalProperties": false}
+                }
+            }],
+            "tool_choice": "auto"
+        }))
+        .expect("body serialization should succeed");
+
+        let normalized = normalize_model_alias_in_request_body(body);
+        let payload: Value =
+            serde_json::from_slice(&normalized).expect("normalized payload must be valid json");
+
+        let tool = payload
+            .get("tools")
+            .and_then(Value::as_array)
+            .and_then(|tools| tools.first())
+            .and_then(Value::as_object)
+            .expect("tools[0] should exist");
+
+        assert!(tool.get("function").is_none());
+        assert_eq!(tool.get("name").and_then(Value::as_str), Some("ping"));
+        assert_eq!(
+            tool.get("description").and_then(Value::as_str),
+            Some("Return pong")
+        );
+    }
+
+    #[test]
+    fn normalizes_chat_tool_choice_schema() {
+        let body = serde_json::to_vec(&json!({
+            "model": "gpt-5.3-codex",
+            "input": "Call ping once",
+            "tools": [{
+                "type": "function",
+                "name": "ping",
+                "parameters": {"type": "object", "properties": {}, "additionalProperties": false}
+            }],
+            "tool_choice": {"type": "function", "function": {"name": "ping"}}
+        }))
+        .expect("body serialization should succeed");
+
+        let normalized = normalize_model_alias_in_request_body(body);
+        let payload: Value =
+            serde_json::from_slice(&normalized).expect("normalized payload must be valid json");
+
+        let tool_choice = payload
+            .get("tool_choice")
+            .and_then(Value::as_object)
+            .expect("tool_choice should be an object");
+
+        assert!(tool_choice.get("function").is_none());
+        assert_eq!(
+            tool_choice.get("type").and_then(Value::as_str),
+            Some("function")
+        );
+        assert_eq!(
+            tool_choice.get("name").and_then(Value::as_str),
+            Some("ping")
+        );
+    }
+
+    #[test]
+    fn normalizes_assistant_and_tool_message_roles() {
+        let body = serde_json::to_vec(&json!({
+            "model": "gpt-5.3-codex",
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": "Calling ping",
+                    "tool_calls": [
+                        {"id": "call_123", "type": "function", "function": {"name": "ping", "arguments": "{}"}}
+                    ]
+                },
+                {"role": "tool", "tool_call_id": "call_123", "content": "pong"},
+                {"role": "user", "content": "continue"}
+            ]
+        }))
+        .expect("body serialization should succeed");
+
+        let normalized = normalize_model_alias_in_request_body(body);
+        let payload: Value =
+            serde_json::from_slice(&normalized).expect("normalized payload must be valid json");
+
+        let input = payload
+            .get("input")
+            .and_then(Value::as_array)
+            .expect("input should be normalized into an array");
+
+        assert_eq!(input.len(), 4);
+
+        assert_eq!(
+            input[0].get("type").and_then(Value::as_str),
+            Some("function_call")
+        );
+        assert_eq!(input[0].get("name").and_then(Value::as_str), Some("ping"));
+        assert_eq!(
+            input[0].get("call_id").and_then(Value::as_str),
+            Some("call_123")
+        );
+
+        assert_eq!(
+            input[1].get("role").and_then(Value::as_str),
+            Some("assistant")
+        );
+        assert_eq!(
+            input[1]
+                .get("content")
+                .and_then(Value::as_array)
+                .and_then(|parts| parts.first())
+                .and_then(|part| part.get("type"))
+                .and_then(Value::as_str),
+            Some("output_text")
+        );
+
+        assert_eq!(
+            input[2].get("type").and_then(Value::as_str),
+            Some("function_call_output")
+        );
+        assert_eq!(
+            input[2].get("call_id").and_then(Value::as_str),
+            Some("call_123")
+        );
+        assert_eq!(input[2].get("output").and_then(Value::as_str), Some("pong"));
+
+        assert_eq!(input[3].get("role").and_then(Value::as_str), Some("user"));
+        assert_eq!(
+            input[3]
+                .get("content")
+                .and_then(Value::as_array)
+                .and_then(|parts| parts.first())
+                .and_then(|part| part.get("type"))
+                .and_then(Value::as_str),
+            Some("input_text")
+        );
+    }
+
+    #[test]
+    fn drops_orphan_tool_messages_without_prior_tool_call() {
+        let body = serde_json::to_vec(&json!({
+            "model": "gpt-5.3-codex",
+            "messages": [
+                {"role": "tool", "tool_call_id": "call_404", "content": "orphan output"},
+                {"role": "user", "content": "continue"}
+            ]
+        }))
+        .expect("body serialization should succeed");
+
+        let normalized = normalize_model_alias_in_request_body(body);
+        let payload: Value =
+            serde_json::from_slice(&normalized).expect("normalized payload must be valid json");
+
+        let input = payload
+            .get("input")
+            .and_then(Value::as_array)
+            .expect("input should be normalized into an array");
+
+        assert_eq!(input.len(), 1);
+        assert_eq!(input[0].get("role").and_then(Value::as_str), Some("user"));
+        assert_eq!(
+            input[0]
+                .get("content")
+                .and_then(Value::as_array)
+                .and_then(|parts| parts.first())
+                .and_then(|part| part.get("type"))
+                .and_then(Value::as_str),
+            Some("input_text")
+        );
+    }
+
+    #[test]
+    fn preserves_typed_input_items() {
+        let body = serde_json::to_vec(&json!({
+            "model": "gpt-5.3-codex",
+            "input": [{"type": "function_call_output", "call_id": "call_abc", "output": "done"}]
+        }))
+        .expect("body serialization should succeed");
+
+        let normalized = normalize_model_alias_in_request_body(body);
+        let payload: Value =
+            serde_json::from_slice(&normalized).expect("normalized payload must be valid json");
+
+        let item = payload
+            .get("input")
+            .and_then(Value::as_array)
+            .and_then(|items| items.first())
+            .and_then(Value::as_object)
+            .expect("first input item should be an object");
+
+        assert_eq!(
+            item.get("type").and_then(Value::as_str),
+            Some("function_call_output")
+        );
+        assert_eq!(
+            item.get("call_id").and_then(Value::as_str),
+            Some("call_abc")
+        );
+        assert_eq!(item.get("output").and_then(Value::as_str), Some("done"));
+        assert!(item.get("role").is_none());
+    }
+
+    #[test]
+    fn strips_unsupported_chat_style_fields() {
+        let body = serde_json::to_vec(&json!({
+            "model": "gpt-5.3-codex",
+            "messages": [{"role": "user", "content": "hello"}],
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "ping",
+                    "description": "Return pong",
+                    "parameters": {"type": "object", "properties": {}, "additionalProperties": false}
+                }
+            }],
+            "tool_choice": "auto",
+            "stream_options": {"include_usage": true},
+            "temperature": 1,
+            "top_p": 1,
+            "max_tokens": 512,
+            "frequency_penalty": 0,
+            "presence_penalty": 0,
+            "response_format": {"type": "json_object"},
+            "metadata": {"trace_id": "abc"}
+        }))
+        .expect("body serialization should succeed");
+
+        let normalized = normalize_model_alias_in_request_body(body);
+        let payload: Value =
+            serde_json::from_slice(&normalized).expect("normalized payload must be valid json");
+        let object = payload
+            .as_object()
+            .expect("normalized payload should remain an object");
+
+        assert!(object.contains_key("model"));
+        assert!(object.contains_key("input"));
+        assert!(object.contains_key("tools"));
+        assert!(object.contains_key("tool_choice"));
+        assert!(object.contains_key("instructions"));
+        assert!(object.contains_key("stream"));
+        assert!(object.contains_key("store"));
+
+        assert!(!object.contains_key("messages"));
+        assert!(!object.contains_key("stream_options"));
+        assert!(!object.contains_key("temperature"));
+        assert!(!object.contains_key("top_p"));
+        assert!(!object.contains_key("max_tokens"));
+        assert!(!object.contains_key("frequency_penalty"));
+        assert!(!object.contains_key("presence_penalty"));
+        assert!(!object.contains_key("response_format"));
+        assert!(!object.contains_key("metadata"));
     }
 }
