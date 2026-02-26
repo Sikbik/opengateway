@@ -399,6 +399,7 @@ fn route_request(request: HttpRequest, state: &Arc<ServiceState>) -> HttpRespons
 }
 
 fn proxy_upstream(request: HttpRequest, state: &Arc<ServiceState>) -> Result<HttpResponse> {
+    let client_requested_stream = request_prefers_stream(&request.body);
     let credential = active_or_refreshed_credential(&state.auth_store)?;
     let normalized_body = normalize_model_alias_in_request_body(request.body);
 
@@ -445,12 +446,56 @@ fn proxy_upstream(request: HttpRequest, state: &Arc<ServiceState>) -> Result<Htt
         .context("failed to read upstream response body")?
         .to_vec();
 
-    Ok(HttpResponse {
+    let has_event_stream_header = headers.iter().any(|(name, value)| {
+        name.eq_ignore_ascii_case("content-type")
+            && value.to_ascii_lowercase().contains("text/event-stream")
+    });
+    let is_event_stream = has_event_stream_header || is_sse_payload(&body);
+
+    let mut response = HttpResponse {
         status,
         reason: status_reason(status).to_string(),
         headers,
         body,
-    })
+    };
+
+    if !client_requested_stream && status < 400 && is_event_stream {
+        if let Some(decoded_body) = extract_response_object_from_sse(&response.body) {
+            response
+                .headers
+                .retain(|(name, _)| !name.eq_ignore_ascii_case("content-type"));
+            response.headers.push((
+                "Content-Type".to_string(),
+                "application/json; charset=utf-8".to_string(),
+            ));
+            response.body = decoded_body;
+        } else {
+            return Ok(json_response(
+                502,
+                json!({
+                    "error": {
+                        "message": "failed to decode upstream streaming response",
+                        "type": "bad_gateway"
+                    }
+                }),
+            ));
+        }
+    }
+
+    if client_requested_stream
+        && is_event_stream
+        && !response
+            .headers
+            .iter()
+            .any(|(name, _)| name.eq_ignore_ascii_case("content-type"))
+    {
+        response.headers.push((
+            "Content-Type".to_string(),
+            "text/event-stream; charset=utf-8".to_string(),
+        ));
+    }
+
+    Ok(response)
 }
 
 fn active_or_refreshed_credential(auth_store: &AuthStore) -> Result<OAuthCredential> {
@@ -668,6 +713,64 @@ fn normalize_model_alias_in_request_body(body: Vec<u8>) -> Vec<u8> {
     payload_object.insert("stream".to_string(), Value::Bool(true));
 
     serde_json::to_vec(&payload).unwrap_or(body)
+}
+
+fn request_prefers_stream(body: &[u8]) -> bool {
+    serde_json::from_slice::<Value>(body)
+        .ok()
+        .and_then(|payload| payload.get("stream").and_then(Value::as_bool))
+        .unwrap_or(false)
+}
+
+fn is_sse_payload(body: &[u8]) -> bool {
+    let text = std::str::from_utf8(body).unwrap_or_default();
+    let trimmed = text.trim_start();
+    trimmed.starts_with("event:") || trimmed.starts_with("data:")
+}
+
+fn extract_response_object_from_sse(body: &[u8]) -> Option<Vec<u8>> {
+    let text = std::str::from_utf8(body).ok()?;
+    let mut response_object: Option<Value> = None;
+
+    for raw_line in text.lines() {
+        let line = raw_line.trim();
+        if !line.starts_with("data:") {
+            continue;
+        }
+
+        let data = line.trim_start_matches("data:").trim();
+        if data.is_empty() || data == "[DONE]" {
+            continue;
+        }
+
+        let Ok(event_payload) = serde_json::from_str::<Value>(data) else {
+            continue;
+        };
+
+        let Some(event_type) = event_payload.get("type").and_then(Value::as_str) else {
+            continue;
+        };
+
+        let response = event_payload.get("response").cloned();
+
+        match event_type {
+            "response.created" => {
+                if response_object.is_none() {
+                    response_object = response;
+                }
+            }
+            "response.completed" | "response.failed" | "response.incomplete" => {
+                if response.is_some() {
+                    response_object = response;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    response_object
+        .filter(Value::is_object)
+        .and_then(|response| serde_json::to_vec(&response).ok())
 }
 
 fn strip_unsupported_fields(payload_object: &mut serde_json::Map<String, Value>) {
@@ -1704,5 +1807,47 @@ mod tests {
         assert!(!object.contains_key("presence_penalty"));
         assert!(!object.contains_key("response_format"));
         assert!(!object.contains_key("metadata"));
+    }
+
+    #[test]
+    fn detects_stream_preference_flag() {
+        assert!(request_prefers_stream(br#"{"stream":true}"#));
+        assert!(!request_prefers_stream(br#"{"stream":false}"#));
+        assert!(!request_prefers_stream(br#"{"model":"gpt-5.3-codex"}"#));
+    }
+
+    #[test]
+    fn detects_sse_payloads() {
+        assert!(is_sse_payload(b"event: response.created\n"));
+        assert!(is_sse_payload(
+            b"\n\ndata: {\"type\":\"response.created\"}\n"
+        ));
+        assert!(!is_sse_payload(b"{\"object\":\"response\"}"));
+    }
+
+    #[test]
+    fn extracts_final_response_object_from_sse() {
+        let sse = concat!(
+            "event: response.created\n",
+            "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"object\":\"response\",\"status\":\"in_progress\"}}\n\n",
+            "event: response.output_text.delta\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"Hello\"}\n\n",
+            "event: response.completed\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"object\":\"response\",\"status\":\"completed\",\"output\":[]}}\n\n"
+        );
+
+        let extracted =
+            extract_response_object_from_sse(sse.as_bytes()).expect("should decode response");
+        let payload: Value = serde_json::from_slice(&extracted).expect("valid decoded json");
+
+        assert_eq!(payload.get("id").and_then(Value::as_str), Some("resp_1"));
+        assert_eq!(
+            payload.get("object").and_then(Value::as_str),
+            Some("response")
+        );
+        assert_eq!(
+            payload.get("status").and_then(Value::as_str),
+            Some("completed")
+        );
     }
 }
