@@ -5,7 +5,12 @@ use std::path::PathBuf;
 use std::process::Command;
 use tauri::AppHandle;
 #[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
+#[cfg(target_os = "windows")]
 use tauri_plugin_shell::ShellExt;
+
+#[cfg(target_os = "windows")]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -173,7 +178,7 @@ fn resolve_wsl_bridge() -> Option<WslBridge> {
         });
     }
 
-    None
+    detect_default_wsl_bridge()
 }
 
 async fn run_sidecar_command(app: &AppHandle, args: &[String]) -> Result<RawOutput, String> {
@@ -218,6 +223,7 @@ fn run_local_command(binary: &PathBuf, args: &[String]) -> Result<RawOutput, Str
 #[cfg(target_os = "windows")]
 fn run_wsl_command(bridge: &WslBridge, args: &[String]) -> Result<RawOutput, String> {
     let mut command = Command::new("wsl.exe");
+    hide_windows_command(&mut command);
     if let Some(distro) = bridge.distro.as_ref() {
         command.arg("-d").arg(distro);
     }
@@ -236,6 +242,42 @@ fn run_wsl_command(bridge: &WslBridge, args: &[String]) -> Result<RawOutput, Str
         stdout: output.stdout,
         stderr: output.stderr,
     })
+}
+
+#[cfg(target_os = "windows")]
+fn detect_default_wsl_bridge() -> Option<WslBridge> {
+    let binary = detect_default_wsl_binary()?;
+    Some(WslBridge {
+        distro: None,
+        workspace: None,
+        binary,
+    })
+}
+
+#[cfg(target_os = "windows")]
+fn detect_default_wsl_binary() -> Option<String> {
+    let mut command = Command::new("wsl.exe");
+    hide_windows_command(&mut command);
+    let output = command
+        .arg("sh")
+        .arg("-lc")
+        .arg(
+            r#"if [ -x "$HOME/.local/bin/opengateway" ] && [ -d "$HOME/.factory" ]; then printf %s "$HOME/.local/bin/opengateway"; fi"#,
+        )
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let stdout = String::from_utf8(output.stdout).ok()?;
+    let binary = stdout.trim();
+    if binary.is_empty() {
+        None
+    } else {
+        Some(binary.to_string())
+    }
 }
 
 fn resolve_local_binary() -> PathBuf {
@@ -296,4 +338,9 @@ fn env_flag(name: &str) -> bool {
 #[cfg(target_os = "windows")]
 fn looks_like_linux_path(value: &str) -> bool {
     value.starts_with('/') || value.starts_with("~/")
+}
+
+#[cfg(target_os = "windows")]
+fn hide_windows_command(command: &mut Command) {
+    command.creation_flags(CREATE_NO_WINDOW);
 }

@@ -19,6 +19,8 @@ use std::fs;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
@@ -34,6 +36,8 @@ const DEFAULT_MAX_QUEUE: usize = 128;
 const DEFAULT_QUEUE_TIMEOUT_SECONDS: f64 = 1.5;
 const DEFAULT_PER_CLIENT_RATE: f64 = 0.0;
 const DEFAULT_PER_CLIENT_BURST: usize = 0;
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
 const FACTORY_PREFERRED_MODEL: &str = "gpt-5.4(xhigh)";
 const FACTORY_PREFERRED_REASONING_EFFORT: &str = "xhigh";
 const DEFAULT_OPENAI_MODEL_CATALOG: [(&str, &str); 26] = [
@@ -829,7 +833,10 @@ fn command_start(args: StartArgs) -> Result<()> {
     let mut child = command
         .stdin(Stdio::null())
         .stdout(Stdio::from(log_handle))
-        .stderr(Stdio::from(err_handle))
+        .stderr(Stdio::from(err_handle));
+    configure_background_command(&mut child);
+
+    let mut child = child
         .spawn()
         .context("failed to start background process")?;
 
@@ -1878,6 +1885,33 @@ fn pid_running(pid: i32) -> bool {
     if pid <= 0 {
         return false;
     }
+
+    #[cfg(windows)]
+    {
+        let filter = format!("PID eq {pid}");
+        let mut command = Command::new("tasklist");
+        hidden_command(&mut command);
+        let output = command
+            .arg("/FO")
+            .arg("CSV")
+            .arg("/NH")
+            .arg("/FI")
+            .arg(filter)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .output();
+
+        return output
+            .ok()
+            .filter(|result| result.status.success())
+            .and_then(|result| String::from_utf8(result.stdout).ok())
+            .map(|stdout| stdout.trim_start().starts_with('"'))
+            .unwrap_or(false);
+    }
+
+    #[cfg(not(windows))]
+    {
     Command::new("kill")
         .arg("-0")
         .arg(pid.to_string())
@@ -1887,9 +1921,35 @@ fn pid_running(pid: i32) -> bool {
         .status()
         .map(|status| status.success())
         .unwrap_or(false)
+    }
 }
 
 fn send_signal(pid: i32, signal: &str) -> Result<()> {
+    #[cfg(windows)]
+    {
+        let mut command = Command::new("taskkill");
+        hidden_command(&mut command);
+        command.arg("/PID").arg(pid.to_string()).arg("/T");
+        if signal == "-KILL" {
+            command.arg("/F");
+        }
+
+        let status = command
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .with_context(|| format!("failed to execute taskkill for pid {pid}"))?;
+
+        return if status.success() {
+            Ok(())
+        } else {
+            Err(anyhow!("taskkill {} {} failed", signal, pid))
+        };
+    }
+
+    #[cfg(not(windows))]
+    {
     let status = Command::new("kill")
         .arg(signal)
         .arg(pid.to_string())
@@ -1903,6 +1963,7 @@ fn send_signal(pid: i32, signal: &str) -> Result<()> {
         Ok(())
     } else {
         Err(anyhow!("kill {} {} failed", signal, pid))
+    }
     }
 }
 
@@ -1988,6 +2049,20 @@ fn epoch_seconds() -> i64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default();
     duration.as_secs() as i64
+}
+
+#[cfg(windows)]
+fn configure_background_command(command: &mut Command) {
+    command.creation_flags(CREATE_NO_WINDOW);
+}
+
+#[cfg(not(windows))]
+fn configure_background_command(_command: &mut Command) {}
+
+#[cfg(windows)]
+fn hidden_command(command: &mut Command) -> &mut Command {
+    command.creation_flags(CREATE_NO_WINDOW);
+    command
 }
 
 #[cfg(test)]
