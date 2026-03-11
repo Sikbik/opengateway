@@ -3,6 +3,7 @@ use serde_json::Value;
 use std::env;
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::OnceLock;
 use tauri::AppHandle;
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
@@ -12,7 +13,7 @@ use tauri_plugin_shell::ShellExt;
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 #[cfg(target_os = "windows")]
-const DETACHED_PROCESS: u32 = 0x00000008;
+static WSL_BRIDGE_CACHE: OnceLock<Option<WslBridge>> = OnceLock::new();
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -137,6 +138,7 @@ enum RuntimeTarget {
 }
 
 #[cfg(target_os = "windows")]
+#[derive(Clone, Debug)]
 struct WslBridge {
     distro: Option<String>,
     workspace: Option<String>,
@@ -180,7 +182,9 @@ fn resolve_wsl_bridge() -> Option<WslBridge> {
         });
     }
 
-    detect_default_wsl_bridge()
+    WSL_BRIDGE_CACHE
+        .get_or_init(detect_default_wsl_bridge)
+        .clone()
 }
 
 async fn run_sidecar_command(app: &AppHandle, args: &[String]) -> Result<RawOutput, String> {
@@ -261,10 +265,23 @@ fn detect_default_wsl_binary() -> Option<String> {
     let mut command = Command::new("wsl.exe");
     hide_windows_command(&mut command);
     let output = command
+        .arg("-e")
         .arg("sh")
         .arg("-lc")
         .arg(
-            r#"if [ -x "$HOME/.local/bin/opengateway" ] && [ -d "$HOME/.factory" ]; then printf %s "$HOME/.local/bin/opengateway"; fi"#,
+            r#"factory_home="${FACTORY_HOME:-$HOME/.factory}"
+if [ ! -d "$factory_home" ]; then
+  exit 1
+fi
+if [ -x "$HOME/.local/bin/opengateway" ]; then
+  printf %s "$HOME/.local/bin/opengateway"
+  exit 0
+fi
+if command -v opengateway >/dev/null 2>&1; then
+  command -v opengateway | tr -d '\n'
+  exit 0
+fi
+exit 1"#,
         )
         .output()
         .ok()?;
@@ -344,5 +361,5 @@ fn looks_like_linux_path(value: &str) -> bool {
 
 #[cfg(target_os = "windows")]
 fn hide_windows_command(command: &mut Command) {
-    command.creation_flags(CREATE_NO_WINDOW | DETACHED_PROCESS);
+    command.creation_flags(CREATE_NO_WINDOW);
 }
