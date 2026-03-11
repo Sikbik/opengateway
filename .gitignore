@@ -17,3 +17,12 @@
 # OS files
 .DS_Store
 
+# Local agent and planning docs
+/AGENTS.md
+/.local-docs/
+/.factory/droids/
+
+# GUI build artifacts
+/gui/node_modules/
+/gui/dist/
+/gui/src-tauri/target/
