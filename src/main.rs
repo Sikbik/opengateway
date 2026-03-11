@@ -843,16 +843,14 @@ fn command_start(args: StartArgs) -> Result<()> {
     let timeout = args.timeout.max(0.1);
     let deadline = Instant::now() + Duration::from_secs_f64(timeout);
     while Instant::now() < deadline {
-        if let Some(pid) = read_pid(&paths.pid_file) {
-            if pid_running(pid) && is_http_ready(&args.host, args.port, Duration::from_millis(500))
-            {
-                println!(
-                    "opengateway started (pid={pid}) on http://{}:{}",
-                    args.host, args.port
-                );
-                println!("log file: {}", paths.log_file.display());
-                return Ok(());
-            }
+        if is_http_ready(&args.host, args.port, Duration::from_millis(500)) {
+            let pid = read_pid(&paths.pid_file).unwrap_or_else(|| child.id() as i32);
+            println!(
+                "opengateway started (pid={pid}) on http://{}:{}",
+                args.host, args.port
+            );
+            println!("log file: {}", paths.log_file.display());
+            return Ok(());
         }
 
         if child
@@ -925,14 +923,18 @@ fn command_run(args: RunArgs) -> Result<()> {
 
 fn command_stop(args: StopArgs) -> Result<()> {
     let paths = build_paths()?;
-    clear_stale_pid_file(&paths.pid_file);
 
     let Some(pid) = read_pid(&paths.pid_file) else {
         println!("opengateway is not running");
         return Ok(());
     };
 
-    if !pid_running(pid) {
+    let health_up = is_http_ready(
+        DEFAULT_FRONT_HOST,
+        DEFAULT_FRONT_PORT,
+        Duration::from_millis(500),
+    );
+    if !pid_running(pid) && !health_up {
         remove_pid(&paths.pid_file);
         println!("opengateway is not running");
         return Ok(());
@@ -941,7 +943,13 @@ fn command_stop(args: StopArgs) -> Result<()> {
     send_signal(pid, "-TERM")?;
     let deadline = Instant::now() + Duration::from_secs_f64(args.timeout.max(0.1));
     while Instant::now() < deadline {
-        if !pid_running(pid) {
+        if !pid_running(pid)
+            && !is_http_ready(
+                DEFAULT_FRONT_HOST,
+                DEFAULT_FRONT_PORT,
+                Duration::from_millis(500),
+            )
+        {
             remove_pid(&paths.pid_file);
             println!("opengateway stopped");
             return Ok(());
@@ -965,7 +973,8 @@ fn command_status(args: StatusArgs) -> Result<()> {
     let paths = build_paths()?;
     clear_stale_pid_file(&paths.pid_file);
     let pid = read_pid(&paths.pid_file);
-    let running = pid.map(pid_running).unwrap_or(false);
+    let front_up = is_http_ready(&args.host, args.port, Duration::from_millis(500));
+    let running = front_up || pid.map(pid_running).unwrap_or(false);
 
     println!("running: {running}");
     println!(
@@ -975,7 +984,7 @@ fn command_status(args: StatusArgs) -> Result<()> {
     );
     println!(
         "front_proxy: {} ({}:{})",
-        if is_http_ready(&args.host, args.port, Duration::from_millis(500)) {
+        if front_up {
             "up"
         } else {
             "down"
