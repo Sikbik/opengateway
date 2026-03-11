@@ -1,4 +1,4 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::env;
 use std::path::PathBuf;
@@ -7,7 +7,7 @@ use tauri::AppHandle;
 #[cfg(target_os = "windows")]
 use tauri_plugin_shell::ShellExt;
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CommandResult {
     success: bool,
