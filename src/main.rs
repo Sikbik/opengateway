@@ -19,6 +19,8 @@ use std::fs;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
+#[cfg(unix)]
+use std::os::unix::process::CommandExt as UnixCommandExt;
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -38,6 +40,8 @@ const DEFAULT_PER_CLIENT_RATE: f64 = 0.0;
 const DEFAULT_PER_CLIENT_BURST: usize = 0;
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
+#[cfg(windows)]
+const DETACHED_PROCESS: u32 = 0x00000008;
 const FACTORY_PREFERRED_MODEL: &str = "gpt-5.4(xhigh)";
 const FACTORY_PREFERRED_REASONING_EFFORT: &str = "xhigh";
 const DEFAULT_OPENAI_MODEL_CATALOG: [(&str, &str); 26] = [
@@ -2062,10 +2066,22 @@ fn epoch_seconds() -> i64 {
 
 #[cfg(windows)]
 fn configure_background_command(command: &mut Command) {
-    command.creation_flags(CREATE_NO_WINDOW);
+    command.creation_flags(CREATE_NO_WINDOW | DETACHED_PROCESS);
 }
 
-#[cfg(not(windows))]
+#[cfg(unix)]
+fn configure_background_command(command: &mut Command) {
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
 fn configure_background_command(_command: &mut Command) {}
 
 #[cfg(windows)]

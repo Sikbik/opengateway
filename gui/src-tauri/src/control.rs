@@ -11,6 +11,8 @@ use tauri_plugin_shell::ShellExt;
 
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
+#[cfg(target_os = "windows")]
+const DETACHED_PROCESS: u32 = 0x00000008;
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -342,5 +344,5 @@ fn looks_like_linux_path(value: &str) -> bool {
 
 #[cfg(target_os = "windows")]
 fn hide_windows_command(command: &mut Command) {
-    command.creation_flags(CREATE_NO_WINDOW);
+    command.creation_flags(CREATE_NO_WINDOW | DETACHED_PROCESS);
 }
