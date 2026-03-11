@@ -1,4 +1,5 @@
 mod auth_store;
+mod gui_api;
 mod oauth;
 mod paths;
 mod service;
@@ -27,7 +28,6 @@ const DEFAULT_FRONT_HOST: &str = "127.0.0.1";
 const DEFAULT_FRONT_PORT: u16 = 42069;
 const DEFAULT_BACKEND_HOST: &str = "127.0.0.1";
 const DEFAULT_BACKEND_PORT: u16 = 42069;
-const DEFAULT_FACTORY_SETTINGS_PATH: &str = "~/.factory/settings.json";
 const DEFAULT_MAX_BODY_BYTES: usize = 10 * 1024 * 1024;
 const DEFAULT_MAX_INFLIGHT: usize = 32;
 const DEFAULT_MAX_QUEUE: usize = 128;
@@ -78,6 +78,9 @@ struct Cli {
 enum Commands {
     Init(InitArgs),
     Setup(SetupArgs),
+    SyncFactory(SyncFactoryArgs),
+    #[command(alias = "gui")]
+    Control(ControlArgs),
     Start(StartArgs),
     Run(RunArgs),
     Stop(StopArgs),
@@ -88,6 +91,20 @@ enum Commands {
     SelfTest(SelfTestArgs),
     FactoryConfig(FactoryConfigArgs),
     Doctor(DoctorArgs),
+    #[command(name = "gui-snapshot", hide = true)]
+    GuiSnapshot,
+    #[command(name = "gui-logs", hide = true)]
+    GuiLogs(GuiLogsArgs),
+    #[command(name = "gui-start", hide = true)]
+    GuiStart,
+    #[command(name = "gui-stop", hide = true)]
+    GuiStop,
+    #[command(name = "gui-doctor", hide = true)]
+    GuiDoctor,
+    #[command(name = "gui-sync-factory", hide = true)]
+    GuiSyncFactory,
+    #[command(name = "gui-set-droid-model", hide = true)]
+    GuiSetDroidModel(GuiSetDroidModelArgs),
     InstallBackend,
 }
 
@@ -127,8 +144,8 @@ struct SetupArgs {
     relogin: bool,
     #[arg(long, default_value = "")]
     base_url: String,
-    #[arg(long, default_value = "~/.factory/config.json")]
-    factory_config: PathBuf,
+    #[arg(long, help = "Path to Factory legacy config.json")]
+    factory_config: Option<PathBuf>,
     #[arg(long, default_value = "")]
     api_key: String,
     #[arg(long, default_value = "")]
@@ -147,6 +164,40 @@ struct SetupArgs {
     per_client_burst: usize,
     #[arg(long)]
     verbose: bool,
+}
+
+#[derive(Debug, clap::Args)]
+struct SyncFactoryArgs {
+    #[arg(long, default_value = "")]
+    base_url: String,
+    #[arg(long, help = "Path to Factory legacy config.json")]
+    factory_config: Option<PathBuf>,
+    #[arg(long, help = "Path to Factory settings.json")]
+    factory_settings: Option<PathBuf>,
+    #[arg(long, default_value = "")]
+    api_key: String,
+    #[arg(long, default_value = "")]
+    models: String,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum ControlModeArg {
+    Auto,
+    Web,
+    Desktop,
+    Check,
+    Build,
+}
+
+#[derive(Debug, clap::Args)]
+struct ControlArgs {
+    #[arg(default_value = "auto")]
+    mode: ControlModeArg,
+    #[arg(
+        long,
+        help = "Path to the repo root that contains gui/ and bin/factory-control"
+    )]
+    workspace: Option<PathBuf>,
 }
 
 #[derive(Debug, clap::Args, Clone)]
@@ -311,6 +362,20 @@ struct DoctorArgs {
     backend_port: u16,
 }
 
+#[derive(Debug, clap::Args)]
+struct GuiLogsArgs {
+    #[arg(long, default_value_t = 160)]
+    limit: usize,
+}
+
+#[derive(Debug, clap::Args)]
+struct GuiSetDroidModelArgs {
+    #[arg(long)]
+    path: PathBuf,
+    #[arg(long)]
+    model: String,
+}
+
 impl StartArgs {
     fn to_run_args(&self, persisted_api_key: String) -> RunArgs {
         RunArgs {
@@ -339,11 +404,28 @@ fn main() {
     }
 }
 
+pub(crate) fn runtime_log_info(message: impl AsRef<str>) {
+    println!("[{}] {}", runtime_log_timestamp_ms(), message.as_ref());
+}
+
+pub(crate) fn runtime_log_error(message: impl AsRef<str>) {
+    eprintln!("[{}] {}", runtime_log_timestamp_ms(), message.as_ref());
+}
+
+fn runtime_log_timestamp_ms() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|value| value.as_millis())
+        .unwrap_or(0)
+}
+
 fn run_cli() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Commands::Init(args) => command_init(args),
         Commands::Setup(args) => command_setup(args),
+        Commands::SyncFactory(args) => command_sync_factory(args),
+        Commands::Control(args) => command_control(args),
         Commands::Start(args) => command_start(args),
         Commands::Run(args) => command_run(args),
         Commands::Stop(args) => command_stop(args),
@@ -354,6 +436,15 @@ fn run_cli() -> Result<()> {
         Commands::SelfTest(args) => command_self_test(args),
         Commands::FactoryConfig(args) => command_factory_config(args),
         Commands::Doctor(args) => command_doctor(args),
+        Commands::GuiSnapshot => gui_api::print_snapshot_json(),
+        Commands::GuiLogs(args) => gui_api::print_logs_json(args.limit),
+        Commands::GuiStart => gui_api::print_command_result_json(&["start"]),
+        Commands::GuiStop => gui_api::print_command_result_json(&["stop"]),
+        Commands::GuiDoctor => gui_api::print_command_result_json(&["doctor"]),
+        Commands::GuiSyncFactory => gui_api::print_command_result_json(&["sync-factory"]),
+        Commands::GuiSetDroidModel(args) => {
+            gui_api::print_droid_model_update_json(&args.path, &args.model)
+        }
         Commands::InstallBackend => command_install_backend(),
     }
 }
@@ -361,6 +452,130 @@ fn run_cli() -> Result<()> {
 fn command_install_backend() -> Result<()> {
     println!("install-backend is deprecated in Rust mode (no external backend binary required).");
     Ok(())
+}
+
+fn command_control(args: ControlArgs) -> Result<()> {
+    let workspace = resolve_control_workspace(args.workspace.as_deref())?;
+    let mut command = build_control_launcher_command(&workspace, args.mode)?;
+    let status = command
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
+        .context("failed to launch Factory Control")?;
+
+    if status.success() {
+        return Ok(());
+    }
+
+    Err(anyhow!(
+        "Factory Control exited with status {}",
+        status
+            .code()
+            .map(|code| code.to_string())
+            .unwrap_or_else(|| "unknown".to_string())
+    ))
+}
+
+fn build_control_launcher_command(workspace: &Path, mode: ControlModeArg) -> Result<Command> {
+    let mode = control_mode_name(mode);
+
+    #[cfg(windows)]
+    {
+        let launcher = workspace.join("bin/factory-control.cmd");
+        if !launcher.exists() {
+            return Err(anyhow!(
+                "Factory Control launcher not found at {}",
+                launcher.display()
+            ));
+        }
+
+        let mut command = Command::new("cmd");
+        command
+            .current_dir(workspace)
+            .arg("/C")
+            .arg(launcher)
+            .arg(mode);
+        return Ok(command);
+    }
+
+    #[cfg(not(windows))]
+    {
+        let launcher = workspace.join("bin/factory-control");
+        if !launcher.exists() {
+            return Err(anyhow!(
+                "Factory Control launcher not found at {}",
+                launcher.display()
+            ));
+        }
+
+        let mut command = Command::new(launcher);
+        command.current_dir(workspace).arg(mode);
+        Ok(command)
+    }
+}
+
+fn control_mode_name(mode: ControlModeArg) -> &'static str {
+    match mode {
+        ControlModeArg::Auto => "auto",
+        ControlModeArg::Web => "web",
+        ControlModeArg::Desktop => "desktop",
+        ControlModeArg::Check => "check",
+        ControlModeArg::Build => "build",
+    }
+}
+
+fn resolve_control_workspace(explicit: Option<&Path>) -> Result<PathBuf> {
+    if let Some(path) = explicit {
+        let workspace = expand_user_path(path);
+        if is_control_workspace(&workspace) {
+            return Ok(workspace);
+        }
+        return Err(anyhow!(
+            "workspace does not contain gui/ and bin/factory-control: {}",
+            workspace.display()
+        ));
+    }
+
+    if let Ok(raw) = std::env::var("OPENGATEWAY_WORKSPACE") {
+        if !raw.trim().is_empty() {
+            let workspace = expand_user_path(Path::new(raw.trim()));
+            if is_control_workspace(&workspace) {
+                return Ok(workspace);
+            }
+        }
+    }
+
+    if let Ok(current) = std::env::current_dir() {
+        if let Some(found) = find_control_workspace_from(&current) {
+            return Ok(found);
+        }
+    }
+
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            if let Some(found) = find_control_workspace_from(parent) {
+                return Ok(found);
+            }
+        }
+    }
+
+    Err(anyhow!(
+        "could not find the Factory Control workspace; run this inside the repo or pass --workspace"
+    ))
+}
+
+fn find_control_workspace_from(start: &Path) -> Option<PathBuf> {
+    start
+        .ancestors()
+        .find(|candidate| is_control_workspace(candidate))
+        .map(Path::to_path_buf)
+}
+
+fn is_control_workspace(path: &Path) -> bool {
+    path.join("gui/package.json").exists()
+        && (path.join("bin/factory-control").exists()
+            || path.join("bin/factory-control.cmd").exists())
 }
 
 fn command_init(args: InitArgs) -> Result<()> {
@@ -450,7 +665,7 @@ fn command_setup(args: SetupArgs) -> Result<()> {
         args.base_url.clone()
     };
     let model_ids = resolve_model_ids(&args.models);
-    let factory_path = expand_user_path(&args.factory_config);
+    let factory_path = resolve_factory_config_path(args.factory_config.as_ref())?;
     let (added, updated, backup) = merge_factory_config(
         &factory_path,
         base_url.trim_end_matches('/'),
@@ -463,7 +678,7 @@ fn command_setup(args: SetupArgs) -> Result<()> {
         println!("Legacy config backup saved: {}", backup_path.display());
     }
 
-    let factory_settings_path = expand_user_path(Path::new(DEFAULT_FACTORY_SETTINGS_PATH));
+    let factory_settings_path = resolve_factory_settings_path(None)?;
     let (settings_added, settings_updated, settings_backup, defaults_updated) =
         merge_factory_settings(
             &factory_settings_path,
@@ -471,10 +686,11 @@ fn command_setup(args: SetupArgs) -> Result<()> {
             &api_key,
             &model_ids,
         )?;
-    println!("Factory settings updated: {}", factory_settings_path.display());
     println!(
-        "Factory custom models added: {settings_added}, updated: {settings_updated}"
+        "Factory settings updated: {}",
+        factory_settings_path.display()
     );
+    println!("Factory custom models added: {settings_added}, updated: {settings_updated}");
     if defaults_updated {
         println!("Factory session and mission defaults now point to GPT-5.4 (XHigh).");
     }
@@ -489,6 +705,53 @@ fn command_setup(args: SetupArgs) -> Result<()> {
     println!("  - opengateway self-test");
     println!("  - opengateway show-key");
     println!("  - opengateway logs -f");
+    Ok(())
+}
+
+fn command_sync_factory(args: SyncFactoryArgs) -> Result<()> {
+    let paths = build_paths()?;
+    paths.ensure_runtime_dirs()?;
+    let api_key = resolve_proxy_api_key(&paths.api_key_file, &args.api_key)?;
+    let model_ids = resolve_model_ids(&args.models);
+    let base_url = if args.base_url.trim().is_empty() {
+        format!("http://{}:{}", DEFAULT_FRONT_HOST, DEFAULT_FRONT_PORT)
+    } else {
+        args.base_url.clone()
+    };
+    let factory_path = resolve_factory_config_path(args.factory_config.as_ref())?;
+    let factory_settings_path = resolve_factory_settings_path(args.factory_settings.as_ref())?;
+
+    let (added, updated, backup) = merge_factory_config(
+        &factory_path,
+        base_url.trim_end_matches('/'),
+        &api_key,
+        &model_ids,
+    )?;
+    println!("Legacy config updated: {}", factory_path.display());
+    println!("Legacy custom models added: {added}, updated: {updated}");
+    if let Some(backup_path) = backup {
+        println!("Legacy config backup saved: {}", backup_path.display());
+    }
+
+    let (settings_added, settings_updated, settings_backup, defaults_updated) =
+        merge_factory_settings(
+            &factory_settings_path,
+            base_url.trim_end_matches('/'),
+            &api_key,
+            &model_ids,
+        )?;
+    println!(
+        "Factory settings updated: {}",
+        factory_settings_path.display()
+    );
+    println!("Factory custom models added: {settings_added}, updated: {settings_updated}");
+    if defaults_updated {
+        println!("Factory session and mission defaults now point to GPT-5.4 (XHigh).");
+    }
+    if let Some(backup_path) = settings_backup {
+        println!("Factory settings backup saved: {}", backup_path.display());
+    }
+
     Ok(())
 }
 
@@ -629,8 +892,8 @@ fn command_run(args: RunArgs) -> Result<()> {
     let model_ids = resolve_model_ids(&args.models);
     let pid = std::process::id() as i32;
     write_pid(&paths.pid_file, pid)?;
-    println!("service starting (pid={pid})");
-    println!("using config: {}", config_path.display());
+    runtime_log_info(format!("service starting (pid={pid})"));
+    runtime_log_info(format!("using config: {}", config_path.display()));
 
     let auth_store = AuthStore::new(paths.auth_dir.join("auth.json"));
     let run_result = service::run_service(
@@ -980,6 +1243,20 @@ fn resolve_config_path(default_path: &Path, raw: Option<&PathBuf>) -> PathBuf {
     }
 }
 
+fn resolve_factory_config_path(raw: Option<&PathBuf>) -> Result<PathBuf> {
+    match raw {
+        Some(path) => Ok(expand_user_path(path)),
+        None => Ok(paths::build_factory_paths()?.config_path),
+    }
+}
+
+fn resolve_factory_settings_path(raw: Option<&PathBuf>) -> Result<PathBuf> {
+    match raw {
+        Some(path) => Ok(expand_user_path(path)),
+        None => Ok(paths::build_factory_paths()?.settings_path),
+    }
+}
+
 fn ensure_config_exists(
     config_path: &Path,
     host: &str,
@@ -1322,10 +1599,12 @@ fn merge_factory_settings_models(
                 replacement.as_object_mut(),
             ) {
                 if let Some(existing_id) = existing.get("id").and_then(Value::as_str) {
-                    replacement_object.insert("id".to_string(), Value::String(existing_id.to_string()));
+                    replacement_object
+                        .insert("id".to_string(), Value::String(existing_id.to_string()));
                 }
                 if let Some(existing_index) = existing.get("index").and_then(Value::as_u64) {
-                    replacement_object.insert("index".to_string(), Value::Number(existing_index.into()));
+                    replacement_object
+                        .insert("index".to_string(), Value::Number(existing_index.into()));
                 }
             }
             if model_id == FACTORY_PREFERRED_MODEL {
@@ -1340,10 +1619,7 @@ fn merge_factory_settings_models(
             let index = current_models.len();
             let model = build_factory_settings_model(model_id, base_url, api_key, index);
             if model_id == FACTORY_PREFERRED_MODEL {
-                preferred_model_id = model
-                    .get("id")
-                    .and_then(Value::as_str)
-                    .map(str::to_string);
+                preferred_model_id = model.get("id").and_then(Value::as_str).map(str::to_string);
             }
             index_by_model.insert(model_id.to_string(), index);
             current_models.push(model);
@@ -1489,13 +1765,11 @@ fn read_json_with_backup(path: &Path) -> Result<(Value, Option<PathBuf>)> {
 fn expand_user_path(path: &Path) -> PathBuf {
     let raw = path.to_string_lossy();
     if raw == "~" {
-        return std::env::var("HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| path.to_path_buf());
+        return paths::home_dir().unwrap_or_else(|_| path.to_path_buf());
     }
     if let Some(rest) = raw.strip_prefix("~/") {
-        if let Ok(home) = std::env::var("HOME") {
-            return PathBuf::from(home).join(rest);
+        if let Ok(home) = paths::home_dir() {
+            return home.join(rest);
         }
     }
     path.to_path_buf()

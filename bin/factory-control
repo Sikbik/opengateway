@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+GUI_DIR="${ROOT_DIR}/gui"
+MODE="${1:-auto}"
+
+if [[ -n "${WSL_DISTRO_NAME:-}" ]]; then
+  case "${MODE}" in
+    desktop|check|build)
+      echo "error: '${MODE}' is not supported from WSL browser mode." >&2
+      echo "use './bin/factory-control web' or 'opengateway control web' in WSL." >&2
+      echo "for desktop bundles, use the GitHub Actions 'Desktop Artifacts' workflow." >&2
+      exit 1
+      ;;
+  esac
+fi
+
+if ! command -v npm >/dev/null 2>&1; then
+  echo "error: npm is required to run Factory Control" >&2
+  exit 1
+fi
+
+if ! command -v cargo >/dev/null 2>&1; then
+  echo "error: cargo is required to run Factory Control" >&2
+  exit 1
+fi
+
+if [[ ! -d "${GUI_DIR}/node_modules" ]]; then
+  echo "Installing GUI dependencies..."
+  (cd "${GUI_DIR}" && npm install)
+fi
+
+if [[ ! -x "${ROOT_DIR}/target/debug/opengateway" && ! -x "${ROOT_DIR}/target/release/opengateway" ]]; then
+  echo "Building opengateway for GUI bridge commands..."
+  cargo build --manifest-path "${ROOT_DIR}/Cargo.toml"
+fi
+
+cd "${GUI_DIR}"
+
+case "${MODE}" in
+  auto)
+    if [[ -n "${WSL_DISTRO_NAME:-}" ]]; then
+      exec npm run web
+    fi
+    exec npm run desktop
+    ;;
+  web)
+    exec npm run web
+    ;;
+  desktop)
+    exec npm run desktop
+    ;;
+  check)
+    exec npm run desktop:check
+    ;;
+  build)
+    exec npm run desktop:build
+    ;;
+  *)
+    echo "usage: ./bin/factory-control [auto|web|desktop|check|build]" >&2
+    exit 1
+    ;;
+esac

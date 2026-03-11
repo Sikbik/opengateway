@@ -1,0 +1,47 @@
+<svg width="160" height="160" viewBox="0 0 160 160" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <radialGradient id="bg" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(80 80) rotate(90) scale(80)">
+      <stop offset="0" stop-color="#2A1B27"/>
+      <stop offset="0.55" stop-color="#140913"/>
+      <stop offset="1" stop-color="#06040A"/>
+    </radialGradient>
+    <radialGradient id="core" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(80 74) rotate(90) scale(52)">
+      <stop offset="0" stop-color="#FFE7EC" stop-opacity="0.94"/>
+      <stop offset="0.18" stop-color="#FFAFBD" stop-opacity="0.9"/>
+      <stop offset="0.62" stop-color="#40192B" stop-opacity="0.82"/>
+      <stop offset="1" stop-color="#120711" stop-opacity="0.98"/>
+    </radialGradient>
+    <linearGradient id="ring" x1="32" y1="28" x2="128" y2="132" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FFB2BF"/>
+      <stop offset="0.45" stop-color="#9F88FF"/>
+      <stop offset="1" stop-color="#FF6A82"/>
+    </linearGradient>
+    <linearGradient id="innerRing" x1="52" y1="48" x2="108" y2="112" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FFEFF2" stop-opacity="0.92"/>
+      <stop offset="0.4" stop-color="#FFB4C2" stop-opacity="0.82"/>
+      <stop offset="1" stop-color="#6A3551" stop-opacity="0.28"/>
+    </linearGradient>
+    <filter id="glow" x="8" y="8" width="144" height="144" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feGaussianBlur stdDeviation="10" result="blur"/>
+      <feComposite in="SourceGraphic" in2="blur" operator="over"/>
+    </filter>
+  </defs>
+
+  <circle cx="80" cy="80" r="67" fill="url(#bg)"/>
+  <circle cx="80" cy="80" r="67" stroke="rgba(255,255,255,0.18)" stroke-width="1.5"/>
+
+  <g opacity="0.9" filter="url(#glow)">
+    <path d="M80 17C114.24 17 142 44.76 142 79" stroke="url(#ring)" stroke-width="6" stroke-linecap="round"/>
+    <path d="M18 81C18 115.24 45.76 143 80 143" stroke="url(#ring)" stroke-width="6" stroke-linecap="round"/>
+    <path d="M128 33C140.67 45.2 148.57 62.29 149 81" stroke="#FFE8EE" stroke-opacity="0.68" stroke-width="2.5" stroke-linecap="round"/>
+  </g>
+
+  <circle cx="80" cy="80" r="49" fill="url(#core)" stroke="url(#innerRing)" stroke-width="2.2"/>
+  <circle cx="80" cy="80" r="38" fill="#110814" fill-opacity="0.72" stroke="#FFC2CD" stroke-opacity="0.24"/>
+
+  <path d="M80 47V78" stroke="#FFE7EC" stroke-width="6" stroke-linecap="round"/>
+  <path d="M101.5 58.2C107.9 64 112 72.4 112 81.8C112 99.28 97.88 113.4 80.4 113.4C62.92 113.4 48.8 99.28 48.8 81.8C48.8 72.38 52.92 63.96 59.36 58.16" stroke="#FFE7EC" stroke-width="6" stroke-linecap="round"/>
+
+  <circle cx="122.5" cy="44.5" r="3" fill="#FFF1F3"/>
+  <circle cx="122.5" cy="44.5" r="9" fill="#FF9FB2" fill-opacity="0.22"/>
+</svg>
