@@ -1,21 +1,29 @@
 # opengateway
 
-`opengateway` is a local OAuth gateway for OpenAI-compatible workflows. It runs on your machine, handles ChatGPT OAuth login, and exposes OpenAI-style endpoints your tooling can call.
+`opengateway` is a local OpenAI-compatible gateway for ChatGPT OAuth workflows. It keeps auth local and exposes endpoints that tools like Factory Droid can call.
 
-## Current support
+```mermaid
+flowchart TD
+    subgraph S["Setup flow"]
+        U1["You run `opengateway setup`"] --> G1["opengateway"]
+        G1 --> C1["Create local config and state"]
+        G1 --> O1["Run ChatGPT OAuth login"]
+        G1 --> F1["Update Factory config, settings, and defaults"]
+    end
 
-- Fully supported today: **Factory Droid**
-- Planned next: additional harness integrations beyond Factory Droid
+    subgraph R["Runtime flow"]
+        U2["Factory Droid or other client"] --> G2["opengateway"]
+        G2 --> E2["OpenAI-compatible API"]
+        G2 --> L2["Local auth, config, and logs"]
+        G2 --> O2["ChatGPT OAuth session and OpenAI"]
+    end
+```
 
-## What it does
-
-- Local proxy on `127.0.0.1:42069` (default)
-- Browser and headless OAuth login
-- OpenAI-compatible endpoints:
-  - `GET /healthz`
-  - `GET /v1/models`
-  - `POST /v1/chat/completions`
-  - `POST /v1/responses`
+Current API surface:
+- `GET /healthz`
+- `GET /v1/models`
+- `POST /v1/chat/completions`
+- `POST /v1/responses`
 
 ## Install
 
@@ -24,86 +32,148 @@ git clone https://github.com/Sikbik/opengateway && cd opengateway
 ./bin/install
 ```
 
-After install, use `opengateway` directly from your shell.
+That installs `opengateway` to `~/.local/bin/opengateway` by default.
 
-## Quick start (Factory Droid)
+## Quick start
 
 ```bash
 opengateway setup
 ```
 
-This runs init + start + login + Factory config update.
-It merges models into both `~/.factory/config.json` and `~/.factory/settings.json`, then writes timestamped backups when either file already exists.
+`setup` will:
+- create the local gateway config if needed
+- start the gateway
+- run OAuth login
+- merge custom models into Factory config and settings
+- align Factory session and mission defaults to the preferred custom model
 
-Headless login option:
+Useful variants:
 
 ```bash
 opengateway setup --headless
+opengateway login --open-browser
+opengateway sync-factory
 ```
 
-Browser login opens manually by default (URL is printed):
-
-```bash
-opengateway setup --open-browser
-```
-
-## Verify your setup
-
-```bash
-opengateway status
-opengateway self-test
-```
-
-Logs:
-
-```bash
-opengateway logs -f
-```
-
-## Use with Factory Droid
-
-1. Restart `droid` if it is already running.
-2. Open the model picker (`/model`).
-3. Select one of the custom `GPT-*` entries added by `opengateway setup` such as `GPT-5.4 (XHigh)`.
-
-When you choose that model, requests route through `opengateway` to OpenAI.
-
-## Useful commands
+## Common commands
 
 ```bash
 opengateway start
 opengateway stop
 opengateway status
-opengateway login
-opengateway login --open-browser
-opengateway login headless
-opengateway self-test
-opengateway show-key
-opengateway factory-config
-opengateway doctor
 opengateway logs -f
+opengateway doctor
+opengateway self-test
+opengateway login
+opengateway login headless
+opengateway show-key
+opengateway sync-factory
 ```
 
-## Runtime paths
+## Factory Droid
 
-Defaults:
+1. Restart `droid` if it is already running.
+2. Open the Factory model picker.
+3. Select one of the custom `GPT-*` entries added by `opengateway setup`.
 
-- Config: `~/.config/opengateway/config.yaml`
-- Data/Binary: `~/.local/share/opengateway`
-- State/Logs: `~/.local/state/opengateway`
-- Auth files: `~/.config/opengateway/auth`
-- Factory legacy config: `~/.factory/config.json`
-- Factory settings: `~/.factory/settings.json`
+Repo droids and machine droids are separate:
+- repo droids: `<workspace>/.factory/droids`
+- machine droids: resolved Factory home `droids/` directory
 
-Overrides:
+If droid routing drifts, run:
 
-- `OPENGATEWAY_CONFIG_DIR`
-- `OPENGATEWAY_DATA_DIR`
-- `OPENGATEWAY_STATE_DIR`
-- `OPENGATEWAY_AUTH_DIR`
-- Plus standard `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME`
+```bash
+opengateway sync-factory
+```
 
-## Login note
+## Optional GUI
 
-- By default, browser login prints the OAuth URL and waits for you to open it.
-- Use `--open-browser` if you want `opengateway` to try opening the URL automatically.
+The GUI is an optional control surface for:
+- gateway start/stop and health
+- auth state and log tail
+- Factory config/settings inspection
+- repo and machine droid inventory
+- droid model reassignment to installed custom models
+
+Run it from the repo root:
+
+```bash
+opengateway control
+```
+
+Launcher behavior:
+- WSL: starts browser mode automatically
+- Linux/macOS: starts the native Tauri shell automatically
+
+Explicit modes:
+
+```bash
+opengateway control web
+opengateway control desktop
+opengateway control check
+opengateway control build
+```
+
+In WSL, only `web` is supported. Native `desktop`, `check`, and `build` modes require a real desktop Linux/macOS host or CI.
+
+Direct repo launcher still works:
+
+```bash
+./bin/factory-control
+```
+
+Windows repo launcher:
+
+```powershell
+.\bin\factory-control.ps1
+```
+
+If you run `opengateway control` outside the repo, pass the checkout explicitly:
+
+```bash
+opengateway control --workspace /path/to/opengateway
+```
+
+## Desktop builds
+
+If you just want desktop artifacts, use GitHub Actions instead of setting up a local packaging toolchain.
+
+Workflow:
+- open `Desktop Artifacts` in GitHub Actions
+- run it manually, or let it run from a PR / push to `main`
+- download the artifact you want:
+  - Windows: NSIS installer
+  - Linux: AppImage
+  - macOS: DMG
+
+Workflow file:
+- `.github/workflows/desktop-artifacts.yml`
+
+The packaged Windows build bundles a native `opengateway.exe` backend and uses the offline WebView2 installer.
+
+## Paths
+
+Gateway defaults on Linux/macOS:
+- config: `~/.config/opengateway/config.yaml`
+- data: `~/.local/share/opengateway`
+- state and logs: `~/.local/state/opengateway`
+- auth files: `~/.config/opengateway/auth`
+
+Gateway defaults on Windows:
+- config: `%APPDATA%\\opengateway\\config.yaml`
+- data: `%APPDATA%\\opengateway`
+- state and logs: `%LOCALAPPDATA%\\opengateway`
+- auth files: `%APPDATA%\\opengateway\\auth`
+
+Factory defaults:
+- home: `~/.factory`
+- legacy config: `~/.factory/config.json`
+- settings: `~/.factory/settings.json`
+- machine droids: `~/.factory/droids`
+
+Factory path overrides:
+- `OPENGATEWAY_FACTORY_HOME`
+- `FACTORY_HOME`
+- `OPENGATEWAY_FACTORY_CONFIG`
+- `OPENGATEWAY_FACTORY_SETTINGS`
+- `OPENGATEWAY_FACTORY_DROIDS_DIR`
