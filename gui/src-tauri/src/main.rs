@@ -1,8 +1,12 @@
 mod control;
 
 fn main() {
-    tauri::Builder::default()
-        .plugin(tauri_plugin_shell::init())
+    let builder = tauri::Builder::default();
+
+    #[cfg(target_os = "windows")]
+    let builder = builder.plugin(tauri_plugin_shell::init());
+
+    builder
         .invoke_handler(tauri::generate_handler![
             control::load_snapshot,
             control::tail_logs,

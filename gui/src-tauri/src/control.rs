@@ -84,13 +84,13 @@ where
     run_json_command_owned(app, args.iter().map(|value| (*value).to_string()).collect()).await
 }
 
-async fn run_json_command_owned<T>(app: &AppHandle, args: Vec<String>) -> Result<T, String>
+async fn run_json_command_owned<T>(_app: &AppHandle, args: Vec<String>) -> Result<T, String>
 where
     T: serde::de::DeserializeOwned,
 {
     let output = match resolve_runtime_target() {
         #[cfg(target_os = "windows")]
-        RuntimeTarget::Bundled => run_sidecar_command(app, &args).await?,
+        RuntimeTarget::Bundled => run_sidecar_command(_app, &args).await?,
         RuntimeTarget::Local(binary) => run_local_command(&binary, &args)?,
         #[cfg(target_os = "windows")]
         RuntimeTarget::Wsl(bridge) => run_wsl_command(&bridge, &args)?,
