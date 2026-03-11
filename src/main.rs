@@ -10,7 +10,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
 use clap::{Parser, Subcommand, ValueEnum};
 use oauth::LoginMode;
-use paths::build_paths;
+use paths::{build_paths, AppPaths};
 use rand::Rng;
 use reqwest::blocking::Client;
 use serde_json::{json, Value};
@@ -787,8 +787,8 @@ fn command_start(args: StartArgs) -> Result<()> {
     let api_key = resolve_proxy_api_key(&paths.api_key_file, &args.api_key)?;
     let run_args = args.to_run_args(api_key.clone());
 
-    let mut command =
-        Command::new(std::env::current_exe().context("failed to resolve executable path")?);
+    let background_executable = resolve_background_executable(&paths)?;
+    let mut command = Command::new(background_executable);
     command
         .arg("run")
         .arg("--host")
@@ -875,6 +875,30 @@ fn command_start(args: StartArgs) -> Result<()> {
         }
     }
     Err(anyhow!("startup failed"))
+}
+
+fn resolve_background_executable(paths: &AppPaths) -> Result<PathBuf> {
+    let current_exe = std::env::current_exe().context("failed to resolve executable path")?;
+
+    #[cfg(windows)]
+    {
+        let runtime_executable = paths.data_dir.join("opengateway-runtime.exe");
+        if current_exe != runtime_executable {
+            fs::copy(&current_exe, &runtime_executable).with_context(|| {
+                format!(
+                    "failed to prepare runtime executable at {}",
+                    runtime_executable.display()
+                )
+            })?;
+        }
+        return Ok(runtime_executable);
+    }
+
+    #[cfg(not(windows))]
+    {
+        let _ = paths;
+        Ok(current_exe)
+    }
 }
 
 fn command_run(args: RunArgs) -> Result<()> {

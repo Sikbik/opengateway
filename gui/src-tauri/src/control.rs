@@ -13,7 +13,7 @@ use tauri_plugin_shell::ShellExt;
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 #[cfg(target_os = "windows")]
-static WSL_BRIDGE_CACHE: OnceLock<Option<WslBridge>> = OnceLock::new();
+static WSL_BRIDGE_CACHE: OnceLock<WslBridge> = OnceLock::new();
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -182,9 +182,15 @@ fn resolve_wsl_bridge() -> Option<WslBridge> {
         });
     }
 
-    WSL_BRIDGE_CACHE
-        .get_or_init(detect_default_wsl_bridge)
-        .clone()
+    if let Some(cached) = WSL_BRIDGE_CACHE.get() {
+        return Some(cached.clone());
+    }
+
+    let detected = detect_default_wsl_bridge().or_else(detect_any_wsl_bridge);
+    if let Some(bridge) = detected.as_ref() {
+        let _ = WSL_BRIDGE_CACHE.set(bridge.clone());
+    }
+    detected
 }
 
 async fn run_sidecar_command(app: &AppHandle, args: &[String]) -> Result<RawOutput, String> {
@@ -252,7 +258,7 @@ fn run_wsl_command(bridge: &WslBridge, args: &[String]) -> Result<RawOutput, Str
 
 #[cfg(target_os = "windows")]
 fn detect_default_wsl_bridge() -> Option<WslBridge> {
-    let binary = detect_default_wsl_binary()?;
+    let binary = detect_wsl_binary(None)?;
     Some(WslBridge {
         distro: None,
         workspace: None,
@@ -261,9 +267,36 @@ fn detect_default_wsl_bridge() -> Option<WslBridge> {
 }
 
 #[cfg(target_os = "windows")]
-fn detect_default_wsl_binary() -> Option<String> {
+fn detect_any_wsl_bridge() -> Option<WslBridge> {
     let mut command = Command::new("wsl.exe");
     hide_windows_command(&mut command);
+    let output = command.arg("--list").arg("--quiet").output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    let stdout = String::from_utf8(output.stdout).ok()?;
+    for distro in stdout.lines().map(str::trim).filter(|line| !line.is_empty()) {
+        let Some(binary) = detect_wsl_binary(Some(distro)) else {
+            continue;
+        };
+        return Some(WslBridge {
+            distro: Some(distro.to_string()),
+            workspace: None,
+            binary,
+        });
+    }
+
+    None
+}
+
+#[cfg(target_os = "windows")]
+fn detect_wsl_binary(distro: Option<&str>) -> Option<String> {
+    let mut command = Command::new("wsl.exe");
+    hide_windows_command(&mut command);
+    if let Some(distro) = distro {
+        command.arg("-d").arg(distro);
+    }
     let output = command
         .arg("-e")
         .arg("sh")
