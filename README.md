@@ -149,7 +149,7 @@ Workflow:
 Workflow file:
 - `.github/workflows/desktop-artifacts.yml`
 
-The packaged Windows build bundles a native `opengateway.exe` backend and uses the offline WebView2 installer.
+The packaged Windows build bundles a native `opengateway.exe` backend and uses the WebView2 bootstrapper installer. That keeps the installer much smaller, but Windows may need internet access if WebView2 is not already present.
 
 ## Paths
 

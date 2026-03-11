@@ -15,9 +15,6 @@
     "tauri": "tauri"
   },
   "dependencies": {
-    "@fontsource/aldrich": "^5.2.7",
-    "@fontsource/chakra-petch": "^5.2.7",
-    "@fontsource/instrument-serif": "^5.2.7",
     "@tauri-apps/api": "^2.10.1",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"
@@ -27,7 +24,6 @@
     "@types/react": "^18.3.20",
     "@types/react-dom": "^18.3.7",
     "@vitejs/plugin-react": "^5.0.4",
-    "playwright": "^1.58.2",
     "typescript": "^5.9.3",
     "vite": "^7.1.10"
   }

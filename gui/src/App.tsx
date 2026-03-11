@@ -1,7 +1,3 @@
-import "@fontsource/aldrich/400.css";
-import "@fontsource/chakra-petch/400.css";
-import "@fontsource/chakra-petch/500.css";
-import "@fontsource/chakra-petch/600.css";
 import powerOrbOffline from "./assets/power-orb-offline.svg";
 import powerOrbOnline from "./assets/power-orb-online.svg";
 import {

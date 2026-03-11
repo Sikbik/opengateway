@@ -6,7 +6,7 @@
     "externalBin": ["binaries/opengateway"],
     "windows": {
       "webviewInstallMode": {
-        "type": "offlineInstaller",
+        "type": "downloadBootstrapper",
         "silent": true
       }
     }

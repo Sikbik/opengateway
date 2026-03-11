@@ -10,4 +10,6 @@ tauri-build = { version = "2.5.6", features = [] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tauri = { version = "2.5.6", features = [] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
 tauri-plugin-shell = "2"

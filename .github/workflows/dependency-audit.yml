@@ -1,0 +1,68 @@
+name: Dependency Audit
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/dependabot.yml"
+      - ".github/workflows/dependency-audit.yml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "src/**"
+      - "gui/package.json"
+      - "gui/package-lock.json"
+      - "gui/src-tauri/Cargo.toml"
+      - "gui/src-tauri/Cargo.lock"
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/dependabot.yml"
+      - ".github/workflows/dependency-audit.yml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "src/**"
+      - "gui/package.json"
+      - "gui/package-lock.json"
+      - "gui/src-tauri/Cargo.toml"
+      - "gui/src-tauri/Cargo.lock"
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: gui/package-lock.json
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+
+      - name: Audit root Rust dependencies
+        run: cargo audit
+
+      - name: Audit GUI Rust dependencies
+        working-directory: gui/src-tauri
+        run: cargo audit
+
+      - name: Install GUI dependencies
+        working-directory: gui
+        run: npm ci
+
+      - name: Audit GUI production dependencies
+        working-directory: gui
+        run: npm audit --omit=dev
