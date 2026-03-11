@@ -35,8 +35,8 @@ jobs:
       matrix:
         include:
           - os: ubuntu-22.04
-            artifact_name: factory-control-linux
-            artifact_path: gui/src-tauri/target/release/bundle/appimage/*.AppImage
+            artifact_name: factory-control-linux-deb
+            artifact_path: gui/src-tauri/target/release/bundle/deb/*.deb
           - os: windows-latest
             artifact_name: factory-control-windows
             artifact_path: gui/src-tauri/target/release/bundle/nsis/*.exe

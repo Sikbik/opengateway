@@ -143,7 +143,7 @@ Workflow:
 - run it manually, or let it run from a PR / push to `main`
 - download the artifact you want:
   - Windows: NSIS installer
-  - Linux: AppImage
+  - Linux: Debian package (`.deb`) for Ubuntu and other Debian-based distros
   - macOS: DMG
 
 Workflow file:
