@@ -184,6 +184,7 @@
 }
 
 :root {
+  color-scheme: dark;
   --bg: #050914;
   --bg-deep: #04070f;
   --panel: rgba(7, 15, 29, 0.82);
@@ -236,8 +237,7 @@ body {
 }
 
 button,
-input,
-select {
+input {
   font: inherit;
 }
 
@@ -1097,9 +1097,18 @@ pre {
   text-transform: uppercase;
 }
 
-.filter-select select {
+.themed-select {
+  position: relative;
+  width: 100%;
+}
+
+.themed-select__trigger {
   width: 100%;
   min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
   border: 1px solid rgba(136, 171, 255, 0.16);
   border-radius: 14px;
   background:
@@ -1108,6 +1117,78 @@ pre {
   color: var(--text);
   padding: 0.75rem 0.88rem;
   outline: none;
+  cursor: pointer;
+  text-align: left;
+}
+
+.themed-select__value,
+.themed-select__placeholder {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.themed-select__placeholder {
+  color: rgba(145, 162, 193, 0.72);
+}
+
+.themed-select__chevron {
+  color: var(--signal);
+  font-size: 0.8rem;
+  flex: 0 0 auto;
+  transition: transform 160ms ease;
+}
+
+.themed-select--open .themed-select__chevron {
+  transform: rotate(180deg);
+}
+
+.themed-select__menu {
+  position: fixed;
+  z-index: 1200;
+  display: grid;
+  gap: 2px;
+  overflow: auto;
+  padding: 8px;
+  border: 1px solid rgba(136, 171, 255, 0.18);
+  border-radius: 16px;
+  background:
+    linear-gradient(180deg, rgba(8, 18, 37, 0.98), rgba(4, 10, 22, 0.98)),
+    rgba(4, 10, 22, 0.96);
+  box-shadow:
+    0 20px 40px rgba(0, 0, 0, 0.4),
+    0 0 0 1px rgba(75, 120, 255, 0.08);
+  backdrop-filter: blur(14px);
+}
+
+.themed-select__menu--up {
+  transform-origin: bottom center;
+}
+
+.themed-select__menu--down {
+  transform-origin: top center;
+}
+
+.themed-select__option {
+  width: 100%;
+  border: 0;
+  border-radius: 12px;
+  background: transparent;
+  color: var(--text);
+  padding: 0.68rem 0.78rem;
+  cursor: pointer;
+  text-align: left;
+}
+
+.themed-select__option:hover,
+.themed-select__option--active {
+  background:
+    linear-gradient(90deg, rgba(25, 223, 164, 0.14), rgba(90, 118, 255, 0.1)),
+    rgba(255, 255, 255, 0.03);
+}
+
+.themed-select--field .themed-select__trigger {
+  min-height: 46px;
 }
 
 .filter-panel__summary {
@@ -1197,17 +1278,10 @@ pre {
   align-items: center;
 }
 
-.droid-row__controls select {
+.droid-row__controls .themed-select__trigger {
   width: 100%;
   min-width: 0;
-  border: 1px solid rgba(136, 171, 255, 0.16);
-  border-radius: 14px;
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.04), rgba(5, 11, 23, 0.94)),
-    rgba(0, 0, 0, 0.28);
-  color: var(--text);
   padding: 0.62rem 0.72rem;
-  outline: none;
 }
 
 .droid-row:first-child {
@@ -1237,7 +1311,7 @@ pre {
   font-size: 0.78rem;
 }
 
-.droid-columns--compact .droid-row__controls select {
+.droid-columns--compact .droid-row__controls .themed-select__trigger {
   padding: 0.62rem 0.74rem;
 }
 
@@ -1270,17 +1344,8 @@ pre {
   align-content: start;
 }
 
-.bulk-panel__controls select {
-  width: 100%;
-  min-width: 0;
-  border: 1px solid rgba(136, 171, 255, 0.16);
-  border-radius: 14px;
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.04), rgba(5, 11, 23, 0.94)),
-    rgba(0, 0, 0, 0.28);
-  color: var(--text);
+.bulk-panel__controls .themed-select__trigger {
   padding: 0.68rem 0.8rem;
-  outline: none;
 }
 
 .bulk-panel__actions {

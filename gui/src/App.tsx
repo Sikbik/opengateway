@@ -1,9 +1,10 @@
 import powerOrbOffline from "./assets/power-orb-offline.svg";
 import powerOrbOnline from "./assets/power-orb-online.svg";
+import { createPortal } from "react-dom";
 import {
   startTransition,
-  useDeferredValue,
   useEffect,
+  useDeferredValue,
   useRef,
   useState,
 } from "react";
@@ -19,6 +20,15 @@ type TabKey = "dashboard" | "droids" | "factory" | "logs";
 type DroidFilterKey = "all" | "custom" | "inherit" | "issues";
 type DroidSortMode = "name" | "scope" | "custom" | "flagged";
 type DroidPresetKey = "none" | "reviewers" | "workers" | "inherited";
+type SelectOption = { value: string; label: string };
+type MenuStyle = {
+  left: number;
+  width: number;
+  maxHeight: number;
+} & (
+  | { top: number; bottom?: never }
+  | { bottom: number; top?: never }
+);
 
 const TABS: Array<{ key: TabKey; label: string; index: string }> = [
   { key: "dashboard", label: "Overview", index: "01" },
@@ -173,6 +183,163 @@ function HelpTip({
         {text}
       </span>
     </span>
+  );
+}
+
+function ThemedSelect({
+  value,
+  options,
+  onChange,
+  placeholder = "Select option",
+  disabled = false,
+  className = "",
+}: {
+  value: string;
+  options: SelectOption[];
+  onChange: (value: string) => void;
+  placeholder?: string;
+  disabled?: boolean;
+  className?: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const triggerRef = useRef<HTMLButtonElement | null>(null);
+  const menuRef = useRef<HTMLDivElement | null>(null);
+  const selectedOption = options.find((option) => option.value === value);
+  const [menuStyle, setMenuStyle] = useState<MenuStyle | null>(null);
+  const [menuDirection, setMenuDirection] = useState<"up" | "down">("down");
+
+  useEffect(() => {
+    if (!open) {
+      return;
+    }
+
+    function updateMenuPosition() {
+      const trigger = triggerRef.current;
+      if (!trigger) {
+        return;
+      }
+
+      const rect = trigger.getBoundingClientRect();
+      const gutter = 12;
+      const gap = 8;
+      const roomBelow = window.innerHeight - rect.bottom - gutter;
+      const roomAbove = rect.top - gutter;
+      const openUp = roomBelow < 220 && roomAbove > roomBelow;
+      const availableHeight = openUp ? roomAbove : roomBelow;
+      const maxHeight = Math.max(140, Math.min(320, availableHeight - gap));
+      const width = rect.width;
+      const left = Math.max(
+        gutter,
+        Math.min(rect.left, window.innerWidth - width - gutter),
+      );
+
+      if (openUp) {
+        setMenuDirection("up");
+        setMenuStyle({
+          left,
+          width,
+          maxHeight,
+          bottom: window.innerHeight - rect.top + gap,
+        });
+        return;
+      }
+
+      setMenuDirection("down");
+      setMenuStyle({
+        left,
+        width,
+        maxHeight,
+        top: rect.bottom + gap,
+      });
+    }
+
+    function handlePointerDown(event: PointerEvent) {
+      const target = event.target as Node | null;
+      if (rootRef.current?.contains(target) || menuRef.current?.contains(target)) {
+        return;
+      }
+      setOpen(false);
+    }
+
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        setOpen(false);
+      }
+    }
+
+    updateMenuPosition();
+    document.addEventListener("pointerdown", handlePointerDown);
+    document.addEventListener("keydown", handleKeyDown);
+    window.addEventListener("resize", updateMenuPosition);
+    window.addEventListener("scroll", updateMenuPosition, true);
+    return () => {
+      document.removeEventListener("pointerdown", handlePointerDown);
+      document.removeEventListener("keydown", handleKeyDown);
+      window.removeEventListener("resize", updateMenuPosition);
+      window.removeEventListener("scroll", updateMenuPosition, true);
+    };
+  }, [open]);
+
+  return (
+    <div
+      ref={rootRef}
+      className={`themed-select${open ? " themed-select--open" : ""}${
+        className ? ` ${className}` : ""
+      }`}
+    >
+      <button
+        ref={triggerRef}
+        type="button"
+        className="themed-select__trigger"
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        disabled={disabled}
+        onClick={() => setOpen((current) => !current)}
+      >
+        <span
+          className={
+            selectedOption ? "themed-select__value" : "themed-select__placeholder"
+          }
+        >
+          {selectedOption?.label ?? placeholder}
+        </span>
+        <span className="themed-select__chevron" aria-hidden="true">
+          ▾
+        </span>
+      </button>
+      {open && menuStyle
+        ? createPortal(
+            <div
+              ref={menuRef}
+              className={`themed-select__menu themed-select__menu--${menuDirection}`}
+              role="listbox"
+              style={menuStyle}
+            >
+              {options.map((option) => (
+                <button
+                  key={option.value}
+                  type="button"
+                  role="option"
+                  aria-selected={option.value === value}
+                  className={
+                    option.value === value
+                      ? "themed-select__option themed-select__option--active"
+                      : "themed-select__option"
+                  }
+                  onClick={() => {
+                    onChange(option.value);
+                    setOpen(false);
+                  }}
+                >
+                  {option.label}
+                </button>
+              ))}
+            </div>,
+            document.body,
+          )
+        : null}
+    </div>
   );
 }
 
@@ -465,6 +632,18 @@ function App() {
   const customDroidCount = filterCounts.custom;
   const inheritedDroidCount = filterCounts.inherit;
   const issueCount = filterCounts.issues;
+  const sortOptions = DROID_SORTS.map((sort) => ({
+    value: sort.key,
+    label: sort.label,
+  }));
+  const modelChoices = modelOptions.map((option) => ({
+    value: option.model,
+    label: option.displayName,
+  }));
+  const bulkModelChoices = [
+    { value: "inherit", label: "Inherit Factory defaults" },
+    ...modelChoices,
+  ];
 
   const missionCards = snapshot
     ? [
@@ -862,18 +1041,14 @@ function App() {
               <div className="filter-panel__tools">
                 <label className="filter-select">
                   <span>Sort</span>
-                  <select
+                  <ThemedSelect
+                    className="themed-select--field"
                     value={sortMode}
-                    onChange={(event) =>
-                      setSortMode(event.target.value as DroidSortMode)
+                    options={sortOptions}
+                    onChange={(nextValue) =>
+                      setSortMode(nextValue as DroidSortMode)
                     }
-                  >
-                    {DROID_SORTS.map((sort) => (
-                      <option key={sort.key} value={sort.key}>
-                        {sort.label}
-                      </option>
-                    ))}
-                  </select>
+                  />
                 </label>
                 <button
                   className={
@@ -923,20 +1098,12 @@ function App() {
                 </div>
               </div>
               <div className="bulk-panel__controls">
-                <select
+                <ThemedSelect
+                  className="themed-select--field"
                   value={bulkModel}
-                  onChange={(event) => setBulkModel(event.target.value)}
-                >
-                  <option value="inherit">Inherit Factory defaults</option>
-                  {modelOptions.map((option) => (
-                    <option
-                      key={`bulk:${option.source}:${option.model}`}
-                      value={option.model}
-                    >
-                      {option.displayName}
-                    </option>
-                  ))}
-                </select>
+                  options={bulkModelChoices}
+                  onChange={setBulkModel}
+                />
                 <div className="bulk-panel__actions">
                   <button
                     className="button button--accent"
@@ -1059,30 +1226,20 @@ function App() {
                           ) : null}
                         </div>
                         <div className="droid-row__controls">
-                          <select
+                          <ThemedSelect
+                            className="themed-select--field"
                             value={
                               selectedModels[droid.path] ?? droid.model ?? ""
                             }
-                            onChange={(event) =>
+                            placeholder="Select model"
+                            options={bulkModelChoices}
+                            onChange={(nextValue) =>
                               setSelectedModels((current) => ({
                                 ...current,
-                                [droid.path]: event.target.value,
+                                [droid.path]: nextValue,
                               }))
                             }
-                          >
-                            <option value="">Select model</option>
-                            <option value="inherit">
-                              Inherit Factory defaults
-                            </option>
-                            {modelOptions.map((option) => (
-                              <option
-                                key={`${option.source}:${option.model}`}
-                                value={option.model}
-                              >
-                                {option.displayName}
-                              </option>
-                            ))}
-                          </select>
+                          />
                           <button
                             className="button button--accent"
                             onClick={() => void handleModelSave(droid)}
