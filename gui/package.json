@@ -6,10 +6,10 @@
   "scripts": {
     "dev": "npm run web",
     "web": "vite --host 127.0.0.1 --port 1420",
-    "desktop": "tauri dev",
+    "desktop": "npm run desktop:prepare-sidecar -- --debug && tauri dev",
     "desktop:prepare-sidecar": "node ./scripts/prepare-sidecar.mjs",
-    "desktop:check": "cargo check --manifest-path src-tauri/Cargo.toml",
-    "desktop:build": "tauri build",
+    "desktop:check": "npm run desktop:prepare-sidecar -- --debug && cargo check --manifest-path src-tauri/Cargo.toml",
+    "desktop:build": "npm run desktop:prepare-sidecar && tauri build",
     "build": "tsc && vite build",
     "preview": "vite preview",
     "tauri": "tauri"

@@ -1,8 +1,5 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "build": {
-    "beforeBundleCommand": "npm run desktop:prepare-sidecar"
-  },
   "bundle": {
     "active": true,
     "targets": ["nsis"],
