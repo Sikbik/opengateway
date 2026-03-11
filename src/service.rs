@@ -166,10 +166,10 @@ pub fn run_service(config: RunConfig, auth_store: AuthStore) -> Result<()> {
         rate_limiter,
     });
 
-    println!(
+    crate::runtime_log_info(format!(
         "opengateway service listening on http://{}:{}",
         config.host, config.port
-    );
+    ));
 
     for incoming in listener.incoming() {
         match incoming {
@@ -177,12 +177,12 @@ pub fn run_service(config: RunConfig, auth_store: AuthStore) -> Result<()> {
                 let shared_state = Arc::clone(&state);
                 thread::spawn(move || {
                     if let Err(err) = handle_connection(stream, shared_state) {
-                        eprintln!("connection handling error: {err:#}");
+                        crate::runtime_log_error(format!("connection handling error: {err:#}"));
                     }
                 });
             }
             Err(err) => {
-                eprintln!("listener accept error: {err}");
+                crate::runtime_log_error(format!("listener accept error: {err}"));
             }
         }
     }
@@ -264,7 +264,7 @@ fn handle_connection(mut stream: TcpStream, state: Arc<ServiceState>) -> Result<
 
     if request.method == "POST" && (path == "/v1/chat/completions" || path == "/v1/responses") {
         if let Err(err) = proxy_upstream(&mut stream, request, &state) {
-            eprintln!("upstream proxy error: {err:#}");
+            crate::runtime_log_error(format!("upstream proxy error: {err:#}"));
             let response = plain_text_response(502, "bad gateway");
             write_http_response(&mut stream, &response)?;
         }
@@ -651,7 +651,12 @@ fn read_http_request(
 }
 
 fn write_http_response(stream: &mut TcpStream, response: &HttpResponse) -> Result<()> {
-    write_http_response_head(stream, response.status, &response.headers, Some(response.body.len()))?;
+    write_http_response_head(
+        stream,
+        response.status,
+        &response.headers,
+        Some(response.body.len()),
+    )?;
     stream
         .write_all(&response.body)
         .context("failed writing HTTP response body")?;
