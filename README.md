@@ -33,7 +33,7 @@ opengateway setup
 ```
 
 This runs init + start + login + Factory config update.
-It merges models into `~/.factory/config.json` and writes a timestamped backup when that file already exists.
+It merges models into both `~/.factory/config.json` and `~/.factory/settings.json`, then writes timestamped backups when either file already exists.
 
 Headless login option:
 
@@ -64,7 +64,7 @@ opengateway logs -f
 
 1. Restart `droid` if it is already running.
 2. Open the model picker (`/model`).
-3. Select one of the custom `GPT-*` entries added by `opengateway setup`.
+3. Select one of the custom `GPT-*` entries added by `opengateway setup` such as `GPT-5.4 (XHigh)`.
 
 When you choose that model, requests route through `opengateway` to OpenAI.
 
@@ -92,6 +92,8 @@ Defaults:
 - Data/Binary: `~/.local/share/opengateway`
 - State/Logs: `~/.local/state/opengateway`
 - Auth files: `~/.config/opengateway/auth`
+- Factory legacy config: `~/.factory/config.json`
+- Factory settings: `~/.factory/settings.json`
 
 Overrides:
 

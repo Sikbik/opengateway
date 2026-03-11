@@ -115,7 +115,6 @@ struct HttpRequest {
 #[derive(Debug)]
 struct HttpResponse {
     status: u16,
-    reason: String,
     headers: Vec<(String, String)>,
     body: Vec<u8>,
 }
@@ -218,6 +217,9 @@ fn handle_connection(mut stream: TcpStream, state: Arc<ServiceState>) -> Result<
     let request = match read_http_request(&mut stream, state.max_body_bytes) {
         Ok(request) => request,
         Err(err) => {
+            if err.message == "empty request" {
+                return Ok(());
+            }
             let response = plain_text_response(err.status, &err.message);
             write_http_response(&mut stream, &response)?;
             return Ok(());
@@ -234,7 +236,42 @@ fn handle_connection(mut stream: TcpStream, state: Arc<ServiceState>) -> Result<
         }
     }
 
-    let response = route_request(request, &state);
+    let path = request.path.split('?').next().unwrap_or_default();
+    if request.method == "GET" && path == "/healthz" {
+        let response = json_response(200, json!({ "status": "ok" }));
+        write_http_response(&mut stream, &response)?;
+        return Ok(());
+    }
+
+    if !is_authorized(&request, &state.api_key) {
+        let response = HttpResponse {
+            status: 401,
+            headers: vec![(
+                "WWW-Authenticate".to_string(),
+                "Bearer realm=\"opengateway\"".to_string(),
+            )],
+            body: b"unauthorized".to_vec(),
+        };
+        write_http_response(&mut stream, &response)?;
+        return Ok(());
+    }
+
+    if request.method == "GET" && path == "/v1/models" {
+        let response = build_models_response(&state.models);
+        write_http_response(&mut stream, &response)?;
+        return Ok(());
+    }
+
+    if request.method == "POST" && (path == "/v1/chat/completions" || path == "/v1/responses") {
+        if let Err(err) = proxy_upstream(&mut stream, request, &state) {
+            eprintln!("upstream proxy error: {err:#}");
+            let response = plain_text_response(502, "bad gateway");
+            write_http_response(&mut stream, &response)?;
+        }
+        return Ok(());
+    }
+
+    let response = plain_text_response(404, "not found");
     write_http_response(&mut stream, &response)?;
     Ok(())
 }
@@ -363,42 +400,11 @@ impl RateLimiter {
     }
 }
 
-fn route_request(request: HttpRequest, state: &Arc<ServiceState>) -> HttpResponse {
-    if !is_authorized(&request, &state.api_key) {
-        return HttpResponse {
-            status: 401,
-            reason: status_reason(401).to_string(),
-            headers: vec![(
-                "WWW-Authenticate".to_string(),
-                "Bearer realm=\"opengateway\"".to_string(),
-            )],
-            body: b"unauthorized".to_vec(),
-        };
-    }
-
-    let path = request.path.split('?').next().unwrap_or_default();
-    if request.method == "GET" && path == "/healthz" {
-        return json_response(200, json!({ "status": "ok" }));
-    }
-
-    if request.method == "GET" && path == "/v1/models" {
-        return build_models_response(&state.models);
-    }
-
-    if request.method == "POST" && (path == "/v1/chat/completions" || path == "/v1/responses") {
-        return match proxy_upstream(request, state) {
-            Ok(response) => response,
-            Err(err) => {
-                eprintln!("upstream proxy error: {err:#}");
-                plain_text_response(502, "bad gateway")
-            }
-        };
-    }
-
-    plain_text_response(404, "not found")
-}
-
-fn proxy_upstream(request: HttpRequest, state: &Arc<ServiceState>) -> Result<HttpResponse> {
+fn proxy_upstream(
+    client_stream: &mut TcpStream,
+    request: HttpRequest,
+    state: &Arc<ServiceState>,
+) -> Result<()> {
     let client_requested_stream = request_prefers_stream(&request.body);
     let credential = active_or_refreshed_credential(&state.auth_store)?;
     let normalized_body = normalize_model_alias_in_request_body(request.body);
@@ -425,7 +431,7 @@ fn proxy_upstream(request: HttpRequest, state: &Arc<ServiceState>) -> Result<Htt
     }
     outbound = outbound.header("originator", "opengateway");
 
-    let upstream_response = outbound
+    let mut upstream_response = outbound
         .send()
         .context("failed to call upstream endpoint")?;
     let status = upstream_response.status().as_u16();
@@ -441,20 +447,36 @@ fn proxy_upstream(request: HttpRequest, state: &Arc<ServiceState>) -> Result<Htt
         }
     }
 
+    let is_event_stream = headers.iter().any(|(name, value)| {
+        name.eq_ignore_ascii_case("content-type")
+            && value.to_ascii_lowercase().contains("text/event-stream")
+    });
+
+    if client_requested_stream {
+        if is_event_stream
+            && !headers
+                .iter()
+                .any(|(name, _)| name.eq_ignore_ascii_case("content-type"))
+        {
+            headers.push((
+                "Content-Type".to_string(),
+                "text/event-stream; charset=utf-8".to_string(),
+            ));
+        }
+
+        write_http_response_head(client_stream, status, &headers, None)?;
+        stream_upstream_response_body(client_stream, &mut upstream_response)?;
+        return Ok(());
+    }
+
     let body = upstream_response
         .bytes()
         .context("failed to read upstream response body")?
         .to_vec();
-
-    let has_event_stream_header = headers.iter().any(|(name, value)| {
-        name.eq_ignore_ascii_case("content-type")
-            && value.to_ascii_lowercase().contains("text/event-stream")
-    });
-    let is_event_stream = has_event_stream_header || is_sse_payload(&body);
+    let is_event_stream = is_event_stream || is_sse_payload(&body);
 
     let mut response = HttpResponse {
         status,
-        reason: status_reason(status).to_string(),
         headers,
         body,
     };
@@ -470,7 +492,7 @@ fn proxy_upstream(request: HttpRequest, state: &Arc<ServiceState>) -> Result<Htt
             ));
             response.body = decoded_body;
         } else {
-            return Ok(json_response(
+            let response = json_response(
                 502,
                 json!({
                     "error": {
@@ -478,24 +500,14 @@ fn proxy_upstream(request: HttpRequest, state: &Arc<ServiceState>) -> Result<Htt
                         "type": "bad_gateway"
                     }
                 }),
-            ));
+            );
+            write_http_response(client_stream, &response)?;
+            return Ok(());
         }
     }
 
-    if client_requested_stream
-        && is_event_stream
-        && !response
-            .headers
-            .iter()
-            .any(|(name, _)| name.eq_ignore_ascii_case("content-type"))
-    {
-        response.headers.push((
-            "Content-Type".to_string(),
-            "text/event-stream; charset=utf-8".to_string(),
-        ));
-    }
-
-    Ok(response)
+    write_http_response(client_stream, &response)?;
+    Ok(())
 }
 
 fn active_or_refreshed_credential(auth_store: &AuthStore) -> Result<OAuthCredential> {
@@ -639,16 +651,27 @@ fn read_http_request(
 }
 
 fn write_http_response(stream: &mut TcpStream, response: &HttpResponse) -> Result<()> {
+    write_http_response_head(stream, response.status, &response.headers, Some(response.body.len()))?;
+    stream
+        .write_all(&response.body)
+        .context("failed writing HTTP response body")?;
+    stream.flush().ok();
+    Ok(())
+}
+
+fn write_http_response_head(
+    stream: &mut TcpStream,
+    status: u16,
+    headers: &[(String, String)],
+    content_length: Option<usize>,
+) -> Result<()> {
     let mut payload = Vec::new();
-    write!(
-        payload,
-        "HTTP/1.1 {} {}\r\n",
-        response.status, response.reason
-    )
-    .context("failed to serialize response status line")?;
+
+    write!(payload, "HTTP/1.1 {} {}\r\n", status, status_reason(status))
+        .context("failed to serialize response status line")?;
 
     let mut content_type_present = false;
-    for (name, value) in &response.headers {
+    for (name, value) in headers {
         if name.eq_ignore_ascii_case("content-length") || name.eq_ignore_ascii_case("connection") {
             continue;
         }
@@ -664,16 +687,40 @@ fn write_http_response(stream: &mut TcpStream, response: &HttpResponse) -> Resul
             .context("failed to serialize content-type")?;
     }
 
-    write!(payload, "Content-Length: {}\r\n", response.body.len())
-        .context("failed to serialize content-length")?;
+    if let Some(content_length) = content_length {
+        write!(payload, "Content-Length: {}\r\n", content_length)
+            .context("failed to serialize content-length")?;
+    }
+
     write!(payload, "Connection: close\r\n\r\n")
         .context("failed to serialize connection header")?;
-
-    payload.extend_from_slice(&response.body);
     stream
         .write_all(&payload)
-        .context("failed writing HTTP response")?;
+        .context("failed writing HTTP response head")?;
     stream.flush().ok();
+    Ok(())
+}
+
+fn stream_upstream_response_body(
+    client_stream: &mut TcpStream,
+    upstream_response: &mut reqwest::blocking::Response,
+) -> Result<()> {
+    let mut buffer = [0_u8; 16 * 1024];
+
+    loop {
+        let read_bytes = upstream_response
+            .read(&mut buffer)
+            .context("failed to read upstream response chunk")?;
+        if read_bytes == 0 {
+            break;
+        }
+
+        client_stream
+            .write_all(&buffer[..read_bytes])
+            .context("failed writing streamed response chunk")?;
+        client_stream.flush().ok();
+    }
+
     Ok(())
 }
 
@@ -875,17 +922,6 @@ fn normalize_model_alias_and_reasoning(payload_object: &mut serde_json::Map<Stri
     };
 
     payload_object.insert("model".to_string(), Value::String(canonical_model));
-
-    let already_has_effort = payload_object
-        .get("reasoning")
-        .and_then(Value::as_object)
-        .and_then(|reasoning| reasoning.get("effort"))
-        .and_then(Value::as_str)
-        .is_some();
-
-    if already_has_effort {
-        return;
-    }
 
     match payload_object.get_mut("reasoning") {
         Some(existing_reasoning) if existing_reasoning.is_object() => {
@@ -1282,7 +1318,6 @@ fn is_reasoning_effort(effort: &str) -> bool {
 fn plain_text_response(status: u16, message: &str) -> HttpResponse {
     HttpResponse {
         status,
-        reason: status_reason(status).to_string(),
         headers: vec![(
             "Content-Type".to_string(),
             "text/plain; charset=utf-8".to_string(),
@@ -1294,7 +1329,6 @@ fn plain_text_response(status: u16, message: &str) -> HttpResponse {
 fn retry_after_response(status: u16, message: &str, seconds: u64) -> HttpResponse {
     HttpResponse {
         status,
-        reason: status_reason(status).to_string(),
         headers: vec![
             (
                 "Content-Type".to_string(),
@@ -1310,7 +1344,6 @@ fn json_response(status: u16, payload: serde_json::Value) -> HttpResponse {
     let body = serde_json::to_vec(&payload).unwrap_or_else(|_| b"{}".to_vec());
     HttpResponse {
         status,
-        reason: status_reason(status).to_string(),
         headers: vec![(
             "Content-Type".to_string(),
             "application/json; charset=utf-8".to_string(),
@@ -1458,7 +1491,7 @@ mod tests {
     }
 
     #[test]
-    fn preserves_existing_reasoning_effort() {
+    fn model_alias_effort_overrides_existing_reasoning_effort() {
         let body = serde_json::to_vec(&json!({
             "model": "gpt-5.2(high)",
             "reasoning": {"effort": "low"}
@@ -1478,7 +1511,7 @@ mod tests {
                 .and_then(Value::as_object)
                 .and_then(|reasoning| reasoning.get("effort"))
                 .and_then(Value::as_str),
-            Some("low")
+            Some("high")
         );
     }
 
