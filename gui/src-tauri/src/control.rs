@@ -89,8 +89,10 @@ where
     T: serde::de::DeserializeOwned,
 {
     let output = match resolve_runtime_target() {
+        #[cfg(target_os = "windows")]
         RuntimeTarget::Bundled => run_sidecar_command(app, &args).await?,
         RuntimeTarget::Local(binary) => run_local_command(&binary, &args)?,
+        #[cfg(target_os = "windows")]
         RuntimeTarget::Wsl(bridge) => run_wsl_command(&bridge, &args)?,
     };
 
@@ -120,11 +122,14 @@ where
 }
 
 enum RuntimeTarget {
+    #[cfg(target_os = "windows")]
     Bundled,
     Local(PathBuf),
+    #[cfg(target_os = "windows")]
     Wsl(WslBridge),
 }
 
+#[cfg(target_os = "windows")]
 struct WslBridge {
     distro: Option<String>,
     workspace: Option<String>,
@@ -151,11 +156,6 @@ fn should_use_bundled_backend() -> bool {
     !cfg!(debug_assertions) && env_nonempty("OPENGATEWAY_BIN").is_none()
 }
 
-#[cfg(not(target_os = "windows"))]
-fn should_use_bundled_backend() -> bool {
-    false
-}
-
 #[cfg(target_os = "windows")]
 fn resolve_wsl_bridge() -> Option<WslBridge> {
     let bridge_forced = env_flag("OPENGATEWAY_WSL_BRIDGE");
@@ -173,11 +173,6 @@ fn resolve_wsl_bridge() -> Option<WslBridge> {
         });
     }
 
-    None
-}
-
-#[cfg(not(target_os = "windows"))]
-fn resolve_wsl_bridge() -> Option<WslBridge> {
     None
 }
 
@@ -243,11 +238,6 @@ fn run_wsl_command(bridge: &WslBridge, args: &[String]) -> Result<RawOutput, Str
     })
 }
 
-#[cfg(not(target_os = "windows"))]
-fn run_wsl_command(_bridge: &WslBridge, _args: &[String]) -> Result<RawOutput, String> {
-    Err("WSL bridge is only available on Windows".to_string())
-}
-
 fn resolve_local_binary() -> PathBuf {
     if let Some(raw) = env_nonempty("OPENGATEWAY_BIN") {
         return PathBuf::from(raw);
@@ -293,6 +283,7 @@ fn env_nonempty(name: &str) -> Option<String> {
     env::var(name).ok().filter(|raw| !raw.trim().is_empty())
 }
 
+#[cfg(target_os = "windows")]
 fn env_flag(name: &str) -> bool {
     matches!(
         env_nonempty(name)
@@ -302,6 +293,7 @@ fn env_flag(name: &str) -> bool {
     )
 }
 
+#[cfg(target_os = "windows")]
 fn looks_like_linux_path(value: &str) -> bool {
     value.starts_with('/') || value.starts_with("~/")
 }
