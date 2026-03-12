@@ -75,7 +75,11 @@ jobs:
           cache-dependency-path: gui/package-lock.json
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustc -V
+          cargo -V
 
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@v2
