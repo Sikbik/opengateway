@@ -132,16 +132,18 @@ jobs:
       - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
 
           tag="${GITHUB_REF_NAME}"
           title="Factory Control ${tag}"
 
-          if gh release view "$tag" >/dev/null 2>&1; then
-            gh release upload "$tag" release-assets/* --clobber
+          if gh release view "$tag" --repo "$GH_REPO" >/dev/null 2>&1; then
+            gh release upload "$tag" release-assets/* --clobber --repo "$GH_REPO"
           else
             gh release create "$tag" release-assets/* \
+              --repo "$GH_REPO" \
               --title "$title" \
               --generate-notes
           fi
