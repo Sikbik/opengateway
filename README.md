@@ -146,6 +146,14 @@ Workflow:
   - Linux: Debian package (`.deb`) for Ubuntu and other Debian-based distros
   - macOS: DMG
 
+To publish those builds to GitHub Releases:
+- push a version tag like `v0.1.0`
+- the same `Desktop Artifacts` workflow will build all three targets
+- after the build job finishes, the workflow will create or update the GitHub Release for that tag and attach:
+  - Windows installer
+  - Linux `.deb`
+  - macOS `.dmg`
+
 Workflow file:
 - `.github/workflows/desktop-artifacts.yml`
 
