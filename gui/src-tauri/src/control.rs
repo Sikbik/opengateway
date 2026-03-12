@@ -5,6 +5,8 @@ use std::env;
 use std::ffi::OsString;
 use std::path::PathBuf;
 use std::process::Command;
+#[cfg(target_os = "windows")]
+use std::process::Stdio;
 use tauri::AppHandle;
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
@@ -524,6 +526,9 @@ fn start_wsl_gateway(bridge: &WslBridge) -> Result<CommandResult, String> {
     let mut command = windows_system_command("wsl.exe");
     hidden_detached_windows_command(&mut command);
     command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .arg("-d")
         .arg(&bridge.distro)
         .arg("-e")
