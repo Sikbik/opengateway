@@ -19,12 +19,10 @@ use std::fs;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
-#[cfg(unix)]
-use std::os::unix::process::CommandExt as UnixCommandExt;
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -825,30 +823,15 @@ fn command_start(args: StartArgs) -> Result<()> {
         command.arg("--no-auto-install");
     }
 
-    let log_handle = fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&paths.log_file)
-        .with_context(|| format!("failed to open log file {}", paths.log_file.display()))?;
-    let err_handle = log_handle
-        .try_clone()
-        .context("failed to clone log handle")?;
-
-    let mut child = command
-        .stdin(Stdio::null())
-        .stdout(Stdio::from(log_handle))
-        .stderr(Stdio::from(err_handle));
-    configure_background_command(&mut child);
-
-    let mut child = child
-        .spawn()
-        .context("failed to start background process")?;
+    let mut child = spawn_background_gateway(command, &paths.log_file)?;
 
     let timeout = args.timeout.max(0.1);
     let deadline = Instant::now() + Duration::from_secs_f64(timeout);
     while Instant::now() < deadline {
         if is_http_ready(&args.host, args.port, Duration::from_millis(500)) {
-            let pid = read_pid(&paths.pid_file).unwrap_or_else(|| child.id() as i32);
+            let pid = read_pid(&paths.pid_file)
+                .or_else(|| child.as_ref().map(|process| process.id() as i32))
+                .unwrap_or_default();
             println!(
                 "opengateway started (pid={pid}) on http://{}:{}",
                 args.host, args.port
@@ -857,17 +840,23 @@ fn command_start(args: StartArgs) -> Result<()> {
             return Ok(());
         }
 
-        if child
-            .try_wait()
-            .context("failed checking child process state")?
-            .is_some()
-        {
-            break;
+        if let Some(child) = child.as_mut() {
+            if child
+                .try_wait()
+                .context("failed checking child process state")?
+                .is_some()
+            {
+                break;
+            }
         }
         thread::sleep(Duration::from_millis(200));
     }
 
-    let _ = child.kill();
+    if let Some(child) = child.as_mut() {
+        let _ = child.kill();
+    } else if let Some(pid) = read_pid(&paths.pid_file) {
+        let _ = send_signal(pid, "-TERM");
+    }
     println!("opengateway failed to start. recent logs:");
     if paths.log_file.exists() {
         for line in tail_file(&paths.log_file, 20)? {
@@ -899,6 +888,75 @@ fn resolve_background_executable(paths: &AppPaths) -> Result<PathBuf> {
         let _ = paths;
         Ok(current_exe)
     }
+}
+
+#[cfg(windows)]
+fn spawn_background_gateway(mut command: Command, log_file: &Path) -> Result<Option<Child>> {
+    let log_handle = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_file)
+        .with_context(|| format!("failed to open log file {}", log_file.display()))?;
+    let err_handle = log_handle
+        .try_clone()
+        .context("failed to clone log handle")?;
+
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(log_handle))
+        .stderr(Stdio::from(err_handle));
+    configure_background_command(&mut command);
+
+    let child = command
+        .spawn()
+        .context("failed to start background process")?;
+    Ok(Some(child))
+}
+
+#[cfg(unix)]
+fn spawn_background_gateway(command: Command, log_file: &Path) -> Result<Option<Child>> {
+    let program = command.get_program().to_owned();
+    let args: Vec<_> = command.get_args().map(|value| value.to_owned()).collect();
+
+    let status = Command::new("bash")
+        .arg("-lc")
+        .arg(r#"log_file="$1"; shift; nohup "$@" </dev/null >>"$log_file" 2>&1 &"#)
+        .arg("opengateway-start")
+        .arg(log_file)
+        .arg(program)
+        .args(args)
+        .status()
+        .context("failed to start detached background process")?;
+
+    if !status.success() {
+        return Err(anyhow!(
+            "failed to start detached background process (status {status})"
+        ));
+    }
+
+    Ok(None)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn spawn_background_gateway(mut command: Command, log_file: &Path) -> Result<Option<Child>> {
+    let log_handle = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_file)
+        .with_context(|| format!("failed to open log file {}", log_file.display()))?;
+    let err_handle = log_handle
+        .try_clone()
+        .context("failed to clone log handle")?;
+
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(log_handle))
+        .stderr(Stdio::from(err_handle));
+
+    let child = command
+        .spawn()
+        .context("failed to start background process")?;
+    Ok(Some(child))
 }
 
 fn command_run(args: RunArgs) -> Result<()> {
@@ -2104,21 +2162,6 @@ fn epoch_seconds() -> i64 {
 fn configure_background_command(command: &mut Command) {
     command.creation_flags(CREATE_NO_WINDOW | DETACHED_PROCESS);
 }
-
-#[cfg(unix)]
-fn configure_background_command(command: &mut Command) {
-    unsafe {
-        command.pre_exec(|| {
-            if libc::setsid() == -1 {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(())
-        });
-    }
-}
-
-#[cfg(not(any(unix, windows)))]
-fn configure_background_command(_command: &mut Command) {}
 
 #[cfg(windows)]
 fn hidden_command(command: &mut Command) -> &mut Command {
