@@ -3,10 +3,11 @@ use serde_json::Value;
 use std::env;
 use std::path::PathBuf;
 use std::process::Command;
-use std::sync::OnceLock;
 use tauri::AppHandle;
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
+#[cfg(target_os = "windows")]
+use std::sync::OnceLock;
 #[cfg(target_os = "windows")]
 use tauri_plugin_shell::ShellExt;
 
@@ -189,30 +190,22 @@ fn resolve_wsl_bridge() -> Option<WslBridge> {
         .clone()
 }
 
+#[cfg(target_os = "windows")]
 async fn run_sidecar_command(app: &AppHandle, args: &[String]) -> Result<RawOutput, String> {
-    #[cfg(target_os = "windows")]
-    {
-        let output = app
-            .shell()
-            .sidecar("opengateway")
-            .map_err(|err| format!("failed to resolve bundled opengateway sidecar: {err}"))?
-            .args(args.iter().map(|value| value.as_str()))
-            .output()
-            .await
-            .map_err(|err| format!("failed to run bundled opengateway sidecar: {err}"))?;
+    let output = app
+        .shell()
+        .sidecar("opengateway")
+        .map_err(|err| format!("failed to resolve bundled opengateway sidecar: {err}"))?
+        .args(args.iter().map(|value| value.as_str()))
+        .output()
+        .await
+        .map_err(|err| format!("failed to run bundled opengateway sidecar: {err}"))?;
 
-        return Ok(RawOutput {
-            code: output.status.code(),
-            stdout: output.stdout,
-            stderr: output.stderr,
-        });
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    {
-        let _ = (app, args);
-        Err("bundled backend is only available on Windows".to_string())
-    }
+    Ok(RawOutput {
+        code: output.status.code(),
+        stdout: output.stdout,
+        stderr: output.stderr,
+    })
 }
 
 fn run_local_command(binary: &PathBuf, args: &[String]) -> Result<RawOutput, String> {
