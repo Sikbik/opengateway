@@ -99,10 +99,10 @@ where
 {
     let output = match resolve_runtime_target() {
         #[cfg(target_os = "windows")]
-        RuntimeTarget::Bundled => run_sidecar_command(_app, &args).await?,
+        RuntimeTarget::Bundled(wsl_bridge) => {
+            run_sidecar_command(_app, &args, wsl_bridge.as_ref()).await?
+        }
         RuntimeTarget::Local(binary) => run_local_command(&binary, &args)?,
-        #[cfg(target_os = "windows")]
-        RuntimeTarget::Wsl(bridge) => run_wsl_command(&bridge, &args)?,
     };
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -132,29 +132,25 @@ where
 
 enum RuntimeTarget {
     #[cfg(target_os = "windows")]
-    Bundled,
+    Bundled(Option<WslBridge>),
     Local(PathBuf),
-    #[cfg(target_os = "windows")]
-    Wsl(WslBridge),
 }
 
 #[cfg(target_os = "windows")]
 #[derive(Clone, Debug)]
 struct WslBridge {
-    distro: Option<String>,
+    distro: String,
+    home: String,
+    factory_home: String,
+    config_dir: String,
     workspace: Option<String>,
-    binary: String,
 }
 
 fn resolve_runtime_target() -> RuntimeTarget {
     #[cfg(target_os = "windows")]
     {
-        if let Some(bridge) = resolve_wsl_bridge() {
-            return RuntimeTarget::Wsl(bridge);
-        }
-
         if should_use_bundled_backend() {
-            return RuntimeTarget::Bundled;
+            return RuntimeTarget::Bundled(resolve_wsl_bridge());
         }
     }
 
@@ -173,14 +169,10 @@ fn resolve_wsl_bridge() -> Option<WslBridge> {
     let workspace = env_nonempty("OPENGATEWAY_WSL_WORKSPACE").or_else(|| {
         env_nonempty("OPENGATEWAY_WORKSPACE").filter(|value| looks_like_linux_path(value))
     });
-    let wsl_binary = env_nonempty("OPENGATEWAY_WSL_BIN");
 
-    if bridge_forced || distro.is_some() || workspace.is_some() || wsl_binary.is_some() {
-        return Some(WslBridge {
-            distro,
-            workspace,
-            binary: wsl_binary.unwrap_or_else(|| "opengateway".to_string()),
-        });
+    if bridge_forced || distro.is_some() || workspace.is_some() {
+        let distro = distro.or_else(detect_default_wsl_distro)?;
+        return probe_wsl_bridge(&distro, workspace);
     }
 
     WSL_BRIDGE_CACHE
@@ -189,11 +181,21 @@ fn resolve_wsl_bridge() -> Option<WslBridge> {
 }
 
 #[cfg(target_os = "windows")]
-async fn run_sidecar_command(app: &AppHandle, args: &[String]) -> Result<RawOutput, String> {
-    let output = app
+async fn run_sidecar_command(
+    app: &AppHandle,
+    args: &[String],
+    wsl_bridge: Option<&WslBridge>,
+) -> Result<RawOutput, String> {
+    let mut command = app
         .shell()
         .sidecar("opengateway")
-        .map_err(|err| format!("failed to resolve bundled opengateway sidecar: {err}"))?
+        .map_err(|err| format!("failed to resolve bundled opengateway sidecar: {err}"))?;
+
+    if let Some(bridge) = wsl_bridge {
+        command = command.envs(wsl_env_overrides(bridge));
+    }
+
+    let output = command
         .args(args.iter().map(|value| value.as_str()))
         .output()
         .await
@@ -220,37 +222,9 @@ fn run_local_command(binary: &PathBuf, args: &[String]) -> Result<RawOutput, Str
 }
 
 #[cfg(target_os = "windows")]
-fn run_wsl_command(bridge: &WslBridge, args: &[String]) -> Result<RawOutput, String> {
-    let mut command = Command::new("wsl.exe");
-    hide_windows_command(&mut command);
-    if let Some(distro) = bridge.distro.as_ref() {
-        command.arg("-d").arg(distro);
-    }
-    if let Some(workspace) = bridge.workspace.as_ref() {
-        command.arg("--cd").arg(workspace);
-    }
-    let output = command
-        .arg("-e")
-        .arg(&bridge.binary)
-        .args(args)
-        .output()
-        .map_err(|err| format!("failed to run opengateway through WSL: {err}"))?;
-
-    Ok(RawOutput {
-        code: output.status.code(),
-        stdout: output.stdout,
-        stderr: output.stderr,
-    })
-}
-
-#[cfg(target_os = "windows")]
 fn detect_default_wsl_bridge() -> Option<WslBridge> {
-    let binary = detect_wsl_binary(None)?;
-    Some(WslBridge {
-        distro: None,
-        workspace: None,
-        binary,
-    })
+    let distro = detect_default_wsl_distro()?;
+    probe_wsl_bridge(&distro, None)
 }
 
 #[cfg(target_os = "windows")]
@@ -262,50 +236,56 @@ fn detect_any_wsl_bridge() -> Option<WslBridge> {
         return None;
     }
 
-    let stdout = String::from_utf8(output.stdout).ok()?;
+    let stdout = decode_wsl_output(&output.stdout)?;
     for distro in stdout.lines().map(str::trim).filter(|line| !line.is_empty()) {
-        let Some(binary) = detect_wsl_binary(Some(distro)) else {
+        let Some(bridge) = probe_wsl_bridge(distro, None) else {
             continue;
         };
-        return Some(WslBridge {
-            distro: Some(distro.to_string()),
-            workspace: None,
-            binary,
-        });
+        return Some(bridge);
     }
 
     None
 }
 
 #[cfg(target_os = "windows")]
-fn detect_wsl_binary(distro: Option<&str>) -> Option<String> {
+fn detect_default_wsl_distro() -> Option<String> {
     let mut command = Command::new("wsl.exe");
     hide_windows_command(&mut command);
-    if let Some(distro) = distro {
-        command.arg("-d").arg(distro);
+    let output = command.arg("--list").arg("--verbose").output().ok()?;
+    if !output.status.success() {
+        return None;
     }
+
+    let stdout = decode_wsl_output(&output.stdout)?;
+    stdout
+        .lines()
+        .find_map(|line| line.trim_start().strip_prefix('*').map(str::trim))
+        .filter(|line| !line.is_empty() && !line.eq_ignore_ascii_case("NAME"))
+        .map(|line| {
+            line.split_whitespace()
+                .next()
+                .unwrap_or_default()
+                .to_string()
+        })
+        .filter(|line| !line.is_empty())
+}
+
+#[cfg(target_os = "windows")]
+fn probe_wsl_bridge(distro: &str, workspace: Option<String>) -> Option<WslBridge> {
+    let mut command = Command::new("wsl.exe");
+    hide_windows_command(&mut command);
+    command.arg("-d").arg(distro);
     let output = command
         .arg("-e")
         .arg("bash")
         .arg("-lc")
         .arg(
-            r#"factory_home="${FACTORY_HOME:-$HOME/.factory}"
+            r#"config_dir="${OPENGATEWAY_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/opengateway}"
+factory_home="${FACTORY_HOME:-$HOME/.factory}"
 if [ ! -d "$factory_home" ]; then
   exit 1
 fi
-if [ -x "$HOME/.local/bin/opengateway" ]; then
-  printf %s "$HOME/.local/bin/opengateway"
-  exit 0
-fi
-if [ -x "$HOME/.cargo/bin/opengateway" ]; then
-  printf %s "$HOME/.cargo/bin/opengateway"
-  exit 0
-fi
-if command -v opengateway >/dev/null 2>&1; then
-  command -v opengateway | tr -d '\n'
-  exit 0
-fi
-exit 1"#,
+printf '%s\n%s\n%s\n' "$HOME" "$factory_home" "$config_dir""#,
         )
         .output()
         .ok()?;
@@ -314,12 +294,21 @@ exit 1"#,
         return None;
     }
 
-    let stdout = String::from_utf8(output.stdout).ok()?;
-    let binary = stdout.trim();
-    if binary.is_empty() {
+    let stdout = decode_wsl_output(&output.stdout)?;
+    let mut lines = stdout.lines().map(str::trim);
+    let home = lines.next()?.to_string();
+    let factory_home = lines.next()?.to_string();
+    let config_dir = lines.next()?.to_string();
+    if home.is_empty() || factory_home.is_empty() || config_dir.is_empty() {
         None
     } else {
-        Some(binary.to_string())
+        Some(WslBridge {
+            distro: distro.to_string(),
+            home,
+            factory_home,
+            config_dir,
+            workspace,
+        })
     }
 }
 
@@ -381,6 +370,72 @@ fn env_flag(name: &str) -> bool {
 #[cfg(target_os = "windows")]
 fn looks_like_linux_path(value: &str) -> bool {
     value.starts_with('/') || value.starts_with("~/")
+}
+
+#[cfg(target_os = "windows")]
+fn decode_wsl_output(bytes: &[u8]) -> Option<String> {
+    if bytes.is_empty() {
+        return Some(String::new());
+    }
+
+    if bytes.len() % 2 == 0 && bytes.iter().skip(1).step_by(2).any(|byte| *byte == 0) {
+        let words = bytes
+            .chunks_exact(2)
+            .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
+            .collect::<Vec<_>>();
+        return String::from_utf16(&words).ok();
+    }
+
+    String::from_utf8(bytes.to_vec()).ok()
+}
+
+#[cfg(target_os = "windows")]
+fn wsl_env_overrides(bridge: &WslBridge) -> Vec<(String, String)> {
+    let mut envs = vec![
+        (
+            "OPENGATEWAY_FACTORY_HOME".to_string(),
+            wsl_unc_path(&bridge.distro, &bridge.factory_home),
+        ),
+        (
+            "OPENGATEWAY_CONFIG_DIR".to_string(),
+            wsl_unc_path(&bridge.distro, &bridge.config_dir),
+        ),
+        (
+            "OPENGATEWAY_AUTH_DIR".to_string(),
+            wsl_unc_path(
+                &bridge.distro,
+                &format!("{}/auth", bridge.config_dir.trim_end_matches('/')),
+            ),
+        ),
+    ];
+
+    if let Some(workspace) = bridge.workspace.as_deref() {
+        envs.push((
+            "OPENGATEWAY_WORKSPACE".to_string(),
+            wsl_unc_path(&bridge.distro, &expand_linux_path(&bridge.home, workspace)),
+        ));
+    }
+
+    envs
+}
+
+#[cfg(target_os = "windows")]
+fn expand_linux_path(home: &str, path: &str) -> String {
+    if path == "~" {
+        home.to_string()
+    } else if let Some(rest) = path.strip_prefix("~/") {
+        format!("{home}/{rest}")
+    } else {
+        path.to_string()
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn wsl_unc_path(distro: &str, linux_path: &str) -> String {
+    let normalized = expand_linux_path("", linux_path)
+        .trim_start_matches('/')
+        .replace('/', "\\");
+    format!(r"\\wsl.localhost\{distro}\{normalized}")
 }
 
 #[cfg(target_os = "windows")]
