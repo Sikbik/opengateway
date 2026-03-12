@@ -81,12 +81,17 @@ jobs:
           rustc -V
           cargo -V
 
-      - name: Cache Rust build artifacts
-        uses: Swatinem/rust-cache@v2
+      - name: Cache Rust dependencies and build outputs
+        uses: actions/cache@v4
         with:
-          workspaces: |
-            . -> target
-            gui/src-tauri -> gui/src-tauri/target
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+            gui/src-tauri/target
+          key: ${{ runner.os }}-rust-${{ hashFiles('Cargo.lock', 'gui/src-tauri/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-rust-
 
       - name: Install GUI dependencies
         working-directory: gui
