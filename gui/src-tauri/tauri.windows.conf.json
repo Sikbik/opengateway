@@ -5,6 +5,9 @@
     "targets": ["nsis"],
     "externalBin": ["binaries/opengateway"],
     "windows": {
+      "nsis": {
+        "installerHooks": "./windows/hooks.nsh"
+      },
       "webviewInstallMode": {
         "type": "downloadBootstrapper",
         "silent": true
