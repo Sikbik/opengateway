@@ -13,7 +13,7 @@ use tauri_plugin_shell::ShellExt;
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 #[cfg(target_os = "windows")]
-static WSL_BRIDGE_CACHE: OnceLock<WslBridge> = OnceLock::new();
+static WSL_BRIDGE_CACHE: OnceLock<Option<WslBridge>> = OnceLock::new();
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -182,15 +182,9 @@ fn resolve_wsl_bridge() -> Option<WslBridge> {
         });
     }
 
-    if let Some(cached) = WSL_BRIDGE_CACHE.get() {
-        return Some(cached.clone());
-    }
-
-    let detected = detect_default_wsl_bridge().or_else(detect_any_wsl_bridge);
-    if let Some(bridge) = detected.as_ref() {
-        let _ = WSL_BRIDGE_CACHE.set(bridge.clone());
-    }
-    detected
+    WSL_BRIDGE_CACHE
+        .get_or_init(|| detect_default_wsl_bridge().or_else(detect_any_wsl_bridge))
+        .clone()
 }
 
 async fn run_sidecar_command(app: &AppHandle, args: &[String]) -> Result<RawOutput, String> {
@@ -299,7 +293,7 @@ fn detect_wsl_binary(distro: Option<&str>) -> Option<String> {
     }
     let output = command
         .arg("-e")
-        .arg("sh")
+        .arg("bash")
         .arg("-lc")
         .arg(
             r#"factory_home="${FACTORY_HOME:-$HOME/.factory}"
@@ -308,6 +302,10 @@ if [ ! -d "$factory_home" ]; then
 fi
 if [ -x "$HOME/.local/bin/opengateway" ]; then
   printf %s "$HOME/.local/bin/opengateway"
+  exit 0
+fi
+if [ -x "$HOME/.cargo/bin/opengateway" ]; then
+  printf %s "$HOME/.cargo/bin/opengateway"
   exit 0
 fi
 if command -v opengateway >/dev/null 2>&1; then
