@@ -372,10 +372,8 @@ function App() {
 
   async function refreshAll() {
     try {
-      const [nextSnapshot, nextLogs] = await Promise.all([
-        call<AppSnapshot>("load_snapshot"),
-        call<string[]>("tail_logs", { limit: 160 }),
-      ]);
+      const nextSnapshot = await call<AppSnapshot>("load_snapshot");
+      const nextLogs = await call<string[]>("tail_logs", { limit: 160 });
 
       if (!mounted.current) {
         return;
@@ -432,10 +430,11 @@ function App() {
   ): Promise<boolean> {
     setBusyAction(action);
     setError(null);
+    let shouldRefresh = false;
     try {
       const result = await task();
       onSuccess?.(result);
-      await refreshAll();
+      shouldRefresh = true;
       return true;
     } catch (cause) {
       setError(String(cause));
@@ -443,6 +442,9 @@ function App() {
     } finally {
       if (mounted.current) {
         setBusyAction(null);
+      }
+      if (shouldRefresh) {
+        void refreshAll();
       }
     }
   }
@@ -692,6 +694,13 @@ function App() {
     : [];
 
   const powerOrb = snapshot?.gateway.running ? powerOrbOnline : powerOrbOffline;
+  const powerLabel = snapshot?.gateway.running
+    ? "Online"
+    : busyAction === "start"
+      ? "Engaging"
+      : busyAction === "stop"
+        ? "Cooling Down"
+        : "Offline";
   const logEntries = logs.slice().reverse().map(parseLogLine);
 
   return (
@@ -735,9 +744,15 @@ function App() {
             >
               {HEALTH_COPY[snapshot?.gateway.health ?? "offline"]}
             </span>
-            <span className="hero__path">
-              {compactValue(snapshot?.workspacePath, 22)}
-            </span>
+            {snapshot?.workspacePath ? (
+              <span className="hero__path">
+                Workspace {compactValue(snapshot.workspacePath, 22)}
+              </span>
+            ) : snapshot?.factory.homePath ? (
+              <span className="hero__path">
+                Factory {compactValue(snapshot.factory.homePath, 22)}
+              </span>
+            ) : null}
             {snapshot?.environment.isWsl ? (
               <span className="hero__runtime-note">
                 Browser bridge mode active for WSL.
@@ -833,15 +848,7 @@ function App() {
                     </button>
 
                     <div className="power-readout">
-                      <span className="power-readout__label">
-                        {busyAction === "start"
-                          ? "Engaging"
-                          : busyAction === "stop"
-                            ? "Cooling Down"
-                            : snapshot?.gateway.running
-                              ? "Online"
-                              : "Offline"}
-                      </span>
+                      <span className="power-readout__label">{powerLabel}</span>
                       <span className="power-readout__hint">
                         {snapshot?.gateway.running
                           ? "Tap the orb to stop gateway"
