@@ -11,10 +11,14 @@ use std::os::windows::process::CommandExt;
 #[cfg(target_os = "windows")]
 use std::sync::OnceLock;
 #[cfg(target_os = "windows")]
+use std::time::{Duration, Instant};
+#[cfg(target_os = "windows")]
 use tauri_plugin_shell::ShellExt;
 
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
+#[cfg(target_os = "windows")]
+const DETACHED_PROCESS: u32 = 0x00000008;
 #[cfg(target_os = "windows")]
 static WSL_BRIDGE_CACHE: OnceLock<WslBridge> = OnceLock::new();
 
@@ -55,6 +59,11 @@ pub async fn tail_logs(app: AppHandle, limit: Option<usize>) -> Result<Vec<Strin
 
 #[tauri::command]
 pub async fn start_gateway(app: AppHandle) -> Result<CommandResult, String> {
+    #[cfg(target_os = "windows")]
+    if let RuntimeTarget::Wsl(bridge) = resolve_runtime_target() {
+        return start_wsl_gateway(&bridge);
+    }
+
     run_json_command(&app, &["gui-start"]).await
 }
 
@@ -101,9 +110,9 @@ where
 {
     let output = match resolve_runtime_target() {
         #[cfg(target_os = "windows")]
-        RuntimeTarget::Bundled(wsl_bridge) => {
-            run_sidecar_command(_app, &args, wsl_bridge.as_ref()).await?
-        }
+        RuntimeTarget::Wsl(bridge) => run_wsl_command(&bridge, &args)?,
+        #[cfg(target_os = "windows")]
+        RuntimeTarget::Bundled => run_sidecar_command(_app, &args).await?,
         RuntimeTarget::Local(binary) => run_local_command(&binary, &args)?,
     };
 
@@ -134,7 +143,9 @@ where
 
 enum RuntimeTarget {
     #[cfg(target_os = "windows")]
-    Bundled(Option<WslBridge>),
+    Wsl(WslBridge),
+    #[cfg(target_os = "windows")]
+    Bundled,
     Local(PathBuf),
 }
 
@@ -142,17 +153,22 @@ enum RuntimeTarget {
 #[derive(Clone, Debug)]
 struct WslBridge {
     distro: String,
+    binary: String,
     home: String,
     factory_home: String,
     config_dir: String,
+    state_dir: String,
     workspace: Option<String>,
 }
 
 fn resolve_runtime_target() -> RuntimeTarget {
     #[cfg(target_os = "windows")]
     {
+        if let Some(bridge) = resolve_wsl_bridge() {
+            return RuntimeTarget::Wsl(bridge);
+        }
         if should_use_bundled_backend() {
-            return RuntimeTarget::Bundled(resolve_wsl_bridge());
+            return RuntimeTarget::Bundled;
         }
     }
 
@@ -187,19 +203,11 @@ fn resolve_wsl_bridge() -> Option<WslBridge> {
 }
 
 #[cfg(target_os = "windows")]
-async fn run_sidecar_command(
-    app: &AppHandle,
-    args: &[String],
-    wsl_bridge: Option<&WslBridge>,
-) -> Result<RawOutput, String> {
+async fn run_sidecar_command(app: &AppHandle, args: &[String]) -> Result<RawOutput, String> {
     let mut command = app
         .shell()
         .sidecar("opengateway")
         .map_err(|err| format!("failed to resolve bundled opengateway sidecar: {err}"))?;
-
-    if let Some(bridge) = wsl_bridge {
-        command = command.envs(wsl_env_overrides(bridge));
-    }
 
     let output = command
         .args(args.iter().map(|value| value.as_str()))
@@ -287,11 +295,22 @@ fn probe_wsl_bridge(distro: &str, workspace: Option<String>) -> Option<WslBridge
         .arg("-lc")
         .arg(
             r#"config_dir="${OPENGATEWAY_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/opengateway}"
+state_dir="${OPENGATEWAY_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/opengateway}"
 factory_home="${FACTORY_HOME:-$HOME/.factory}"
 if [ ! -d "$factory_home" ]; then
   exit 1
 fi
-printf '%s\n%s\n%s\n' "$HOME" "$factory_home" "$config_dir""#,
+if [ -x "$HOME/.local/bin/opengateway" ]; then
+  binary="$HOME/.local/bin/opengateway"
+elif [ -x "$HOME/.cargo/bin/opengateway" ]; then
+  binary="$HOME/.cargo/bin/opengateway"
+else
+  binary="$(command -v opengateway 2>/dev/null || true)"
+fi
+if [ -z "$binary" ]; then
+  exit 1
+fi
+printf '%s\n%s\n%s\n%s\n%s\n' "$HOME" "$factory_home" "$config_dir" "$state_dir" "$binary""#,
         )
         .output()
         .ok()?;
@@ -305,14 +324,23 @@ printf '%s\n%s\n%s\n' "$HOME" "$factory_home" "$config_dir""#,
     let home = lines.next()?.to_string();
     let factory_home = lines.next()?.to_string();
     let config_dir = lines.next()?.to_string();
-    if home.is_empty() || factory_home.is_empty() || config_dir.is_empty() {
+    let state_dir = lines.next()?.to_string();
+    let binary = lines.next()?.to_string();
+    if home.is_empty()
+        || factory_home.is_empty()
+        || config_dir.is_empty()
+        || state_dir.is_empty()
+        || binary.is_empty()
+    {
         None
     } else {
         Some(WslBridge {
             distro: distro.to_string(),
+            binary,
             home,
             factory_home,
             config_dir,
+            state_dir,
             workspace,
         })
     }
@@ -396,55 +424,6 @@ fn decode_wsl_output(bytes: &[u8]) -> Option<String> {
 }
 
 #[cfg(target_os = "windows")]
-fn wsl_env_overrides(bridge: &WslBridge) -> Vec<(String, String)> {
-    let mut envs = vec![
-        (
-            "OPENGATEWAY_FACTORY_HOME".to_string(),
-            wsl_unc_path(&bridge.distro, &bridge.factory_home),
-        ),
-        (
-            "OPENGATEWAY_CONFIG_DIR".to_string(),
-            wsl_unc_path(&bridge.distro, &bridge.config_dir),
-        ),
-        (
-            "OPENGATEWAY_AUTH_DIR".to_string(),
-            wsl_unc_path(
-                &bridge.distro,
-                &format!("{}/auth", bridge.config_dir.trim_end_matches('/')),
-            ),
-        ),
-    ];
-
-    if let Some(workspace) = bridge.workspace.as_deref() {
-        envs.push((
-            "OPENGATEWAY_WORKSPACE".to_string(),
-            wsl_unc_path(&bridge.distro, &expand_linux_path(&bridge.home, workspace)),
-        ));
-    }
-
-    envs
-}
-
-#[cfg(target_os = "windows")]
-fn expand_linux_path(home: &str, path: &str) -> String {
-    if path == "~" {
-        home.to_string()
-    } else if let Some(rest) = path.strip_prefix("~/") {
-        format!("{home}/{rest}")
-    } else {
-        path.to_string()
-    }
-}
-
-#[cfg(target_os = "windows")]
-fn wsl_unc_path(distro: &str, linux_path: &str) -> String {
-    let normalized = expand_linux_path("", linux_path)
-        .trim_start_matches('/')
-        .replace('/', "\\");
-    format!(r"\\wsl$\{distro}\{normalized}")
-}
-
-#[cfg(target_os = "windows")]
 fn windows_system_command(executable: &str) -> Command {
     if let Some(path) = windows_system_executable(executable) {
         return Command::new(path);
@@ -466,4 +445,181 @@ fn windows_system_executable(executable: &str) -> Option<OsString> {
 #[cfg(target_os = "windows")]
 fn hide_windows_command(command: &mut Command) {
     command.creation_flags(CREATE_NO_WINDOW);
+}
+
+#[cfg(target_os = "windows")]
+fn hidden_detached_windows_command(command: &mut Command) {
+    command.creation_flags(CREATE_NO_WINDOW | DETACHED_PROCESS);
+}
+
+#[cfg(target_os = "windows")]
+fn run_wsl_command(bridge: &WslBridge, args: &[String]) -> Result<RawOutput, String> {
+    let mut command = windows_system_command("wsl.exe");
+    hide_windows_command(&mut command);
+    let output = command
+        .arg("-d")
+        .arg(&bridge.distro)
+        .arg("-e")
+        .arg("bash")
+        .arg("-lc")
+        .arg(
+            r#"factory_home="$1"
+config_dir="$2"
+state_dir="$3"
+workspace="$4"
+binary="$5"
+shift 5
+export OPENGATEWAY_FACTORY_HOME="$factory_home"
+export OPENGATEWAY_CONFIG_DIR="$config_dir"
+export OPENGATEWAY_AUTH_DIR="$config_dir/auth"
+export OPENGATEWAY_STATE_DIR="$state_dir"
+if [ -n "$workspace" ]; then
+  export OPENGATEWAY_WORKSPACE="$workspace"
+else
+  unset OPENGATEWAY_WORKSPACE
+fi
+exec "$binary" "$@""#,
+        )
+        .arg("opengateway-wsl")
+        .arg(&bridge.factory_home)
+        .arg(&bridge.config_dir)
+        .arg(&bridge.state_dir)
+        .arg(bridge.workspace.as_deref().unwrap_or(""))
+        .arg(&bridge.binary)
+        .args(args)
+        .output()
+        .map_err(|err| format!("failed to run WSL opengateway command: {err}"))?;
+
+    Ok(RawOutput {
+        code: output.status.code(),
+        stdout: output.stdout,
+        stderr: output.stderr,
+    })
+}
+
+#[cfg(target_os = "windows")]
+fn start_wsl_gateway(bridge: &WslBridge) -> Result<CommandResult, String> {
+    if let Ok(snapshot) = run_wsl_json_command::<Value>(bridge, &["gui-snapshot".to_string()]) {
+        if snapshot
+            .get("gateway")
+            .and_then(|gateway| gateway.get("running"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
+            let pid = snapshot
+                .get("gateway")
+                .and_then(|gateway| gateway.get("pid"))
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            return Ok(CommandResult {
+                success: true,
+                output: format!("opengateway already running (pid={pid})"),
+            });
+        }
+    }
+
+    let workspace = bridge.workspace.as_deref().unwrap_or("");
+    let log_file = format!("{}/opengateway.log", bridge.state_dir.trim_end_matches('/'));
+
+    let mut command = windows_system_command("wsl.exe");
+    hidden_detached_windows_command(&mut command);
+    command
+        .arg("-d")
+        .arg(&bridge.distro)
+        .arg("-e")
+        .arg("bash")
+        .arg("-lc")
+        .arg(
+            r#"factory_home="$1"
+config_dir="$2"
+state_dir="$3"
+workspace="$4"
+binary="$5"
+log_file="$6"
+mkdir -p "$state_dir"
+export OPENGATEWAY_FACTORY_HOME="$factory_home"
+export OPENGATEWAY_CONFIG_DIR="$config_dir"
+export OPENGATEWAY_AUTH_DIR="$config_dir/auth"
+export OPENGATEWAY_STATE_DIR="$state_dir"
+if [ -n "$workspace" ]; then
+  export OPENGATEWAY_WORKSPACE="$workspace"
+  cd "$workspace" || exit 1
+else
+  unset OPENGATEWAY_WORKSPACE
+fi
+exec "$binary" run >>"$log_file" 2>&1"#,
+        )
+        .arg("opengateway-wsl-start")
+        .arg(&bridge.factory_home)
+        .arg(&bridge.config_dir)
+        .arg(&bridge.state_dir)
+        .arg(workspace)
+        .arg(&bridge.binary)
+        .arg(&log_file);
+
+    command
+        .spawn()
+        .map_err(|err| format!("failed to launch WSL gateway host: {err}"))?;
+
+    let deadline = Instant::now() + Duration::from_secs(12);
+    while Instant::now() < deadline {
+        if let Ok(snapshot) = run_wsl_json_command::<Value>(bridge, &["gui-snapshot".to_string()]) {
+            let gateway = snapshot.get("gateway").cloned().unwrap_or(Value::Null);
+            let running = gateway
+                .get("running")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let health = gateway
+                .get("health")
+                .and_then(Value::as_str)
+                .unwrap_or("offline");
+            if running || health != "offline" {
+                let pid = gateway.get("pid").and_then(Value::as_u64).unwrap_or(0);
+                return Ok(CommandResult {
+                    success: true,
+                    output: format!("opengateway started (pid={pid}) on http://127.0.0.1:42069"),
+                });
+            }
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+
+    let logs = run_wsl_json_command::<Vec<String>>(
+        bridge,
+        &["gui-logs".to_string(), "--limit".to_string(), "20".to_string()],
+    )
+    .unwrap_or_default()
+    .join("\n");
+    Err(format!("opengateway failed to start. recent logs:\n{logs}"))
+}
+
+#[cfg(target_os = "windows")]
+fn run_wsl_json_command<T>(bridge: &WslBridge, args: &[String]) -> Result<T, String>
+where
+    T: serde::de::DeserializeOwned,
+{
+    let output = run_wsl_command(bridge, args)?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if !output.success() {
+        let combined = format!("{}{}", stdout, stderr).trim().to_string();
+        return Err(if combined.is_empty() {
+            format!(
+                "command failed{}",
+                output
+                    .code
+                    .map(|code| format!(" with exit code {code}"))
+                    .unwrap_or_default()
+            )
+        } else {
+            combined
+        });
+    }
+
+    serde_json::from_str(stdout.trim()).map_err(|err| {
+        format!(
+            "failed to decode WSL opengateway JSON output: {err}; output was: {}",
+            stdout.trim()
+        )
+    })
 }
