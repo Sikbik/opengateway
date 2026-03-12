@@ -12,6 +12,10 @@ fn main() {
     let builder = builder.plugin(tauri_plugin_shell::init());
 
     builder
+        .setup(|_app| {
+            control::cleanup_managed_gateway_on_startup();
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             control::load_snapshot,
             control::tail_logs,
@@ -21,6 +25,11 @@ fn main() {
             control::sync_factory,
             control::set_droid_model,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running factory-control");
+        .build(tauri::generate_context!())
+        .expect("error while building factory-control")
+        .run(|_app, event| {
+            if matches!(event, tauri::RunEvent::Exit) {
+                control::stop_managed_gateway_on_exit();
+            }
+        });
 }

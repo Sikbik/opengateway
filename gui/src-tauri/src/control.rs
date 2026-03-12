@@ -11,6 +11,8 @@ use tauri::AppHandle;
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
 #[cfg(target_os = "windows")]
+use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(target_os = "windows")]
 use std::sync::OnceLock;
 #[cfg(target_os = "windows")]
 use std::time::{Duration, Instant};
@@ -20,9 +22,9 @@ use tauri_plugin_shell::ShellExt;
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 #[cfg(target_os = "windows")]
-const DETACHED_PROCESS: u32 = 0x00000008;
-#[cfg(target_os = "windows")]
 static WSL_BRIDGE_CACHE: OnceLock<WslBridge> = OnceLock::new();
+#[cfg(target_os = "windows")]
+static WSL_GATEWAY_STARTED_BY_APP: AtomicBool = AtomicBool::new(false);
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -71,7 +73,13 @@ pub async fn start_gateway(app: AppHandle) -> Result<CommandResult, String> {
 
 #[tauri::command]
 pub async fn stop_gateway(app: AppHandle) -> Result<CommandResult, String> {
-    run_json_command(&app, &["gui-stop"]).await
+    let result = run_json_command(&app, &["gui-stop"]).await?;
+    #[cfg(target_os = "windows")]
+    if let RuntimeTarget::Wsl(bridge) = resolve_runtime_target() {
+        let _ = clear_managed_marker(&bridge);
+        WSL_GATEWAY_STARTED_BY_APP.store(false, Ordering::Relaxed);
+    }
+    Ok(result)
 }
 
 #[tauri::command]
@@ -162,6 +170,38 @@ struct WslBridge {
     state_dir: String,
     workspace: Option<String>,
 }
+
+#[cfg(target_os = "windows")]
+pub fn cleanup_managed_gateway_on_startup() {
+    let Some(bridge) = resolve_wsl_bridge() else {
+        return;
+    };
+    if !has_managed_marker(&bridge) {
+        return;
+    }
+    let _ = run_wsl_command(&bridge, &["gui-stop".to_string()]);
+    let _ = clear_managed_marker(&bridge);
+    WSL_GATEWAY_STARTED_BY_APP.store(false, Ordering::Relaxed);
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn cleanup_managed_gateway_on_startup() {}
+
+#[cfg(target_os = "windows")]
+pub fn stop_managed_gateway_on_exit() {
+    if !WSL_GATEWAY_STARTED_BY_APP.load(Ordering::Relaxed) {
+        return;
+    }
+    let Some(bridge) = resolve_wsl_bridge() else {
+        return;
+    };
+    let _ = run_wsl_command(&bridge, &["gui-stop".to_string()]);
+    let _ = clear_managed_marker(&bridge);
+    WSL_GATEWAY_STARTED_BY_APP.store(false, Ordering::Relaxed);
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn stop_managed_gateway_on_exit() {}
 
 fn resolve_runtime_target() -> RuntimeTarget {
     #[cfg(target_os = "windows")]
@@ -450,11 +490,6 @@ fn hide_windows_command(command: &mut Command) {
 }
 
 #[cfg(target_os = "windows")]
-fn hidden_detached_windows_command(command: &mut Command) {
-    command.creation_flags(CREATE_NO_WINDOW | DETACHED_PROCESS);
-}
-
-#[cfg(target_os = "windows")]
 fn run_wsl_command(bridge: &WslBridge, args: &[String]) -> Result<RawOutput, String> {
     let mut command = windows_system_command("wsl.exe");
     hide_windows_command(&mut command);
@@ -524,7 +559,7 @@ fn start_wsl_gateway(bridge: &WslBridge) -> Result<CommandResult, String> {
     let log_file = format!("{}/opengateway.log", bridge.state_dir.trim_end_matches('/'));
 
     let mut command = windows_system_command("wsl.exe");
-    hidden_detached_windows_command(&mut command);
+    hide_windows_command(&mut command);
     command
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -580,6 +615,8 @@ exec "$binary" run >>"$log_file" 2>&1"#,
                 .unwrap_or("offline");
             if running || health != "offline" {
                 let pid = gateway.get("pid").and_then(Value::as_u64).unwrap_or(0);
+                let _ = write_managed_marker(bridge);
+                WSL_GATEWAY_STARTED_BY_APP.store(true, Ordering::Relaxed);
                 return Ok(CommandResult {
                     success: true,
                     output: format!("opengateway started (pid={pid}) on http://127.0.0.1:42069"),
@@ -627,4 +664,76 @@ where
             stdout.trim()
         )
     })
+}
+
+#[cfg(target_os = "windows")]
+fn has_managed_marker(bridge: &WslBridge) -> bool {
+    let mut command = windows_system_command("wsl.exe");
+    hide_windows_command(&mut command);
+    command
+        .arg("-d")
+        .arg(&bridge.distro)
+        .arg("-e")
+        .arg("bash")
+        .arg("-lc")
+        .arg(r#"test -f "$1""#)
+        .arg("factory-control-marker")
+        .arg(managed_marker_path(bridge))
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+#[cfg(target_os = "windows")]
+fn write_managed_marker(bridge: &WslBridge) -> Result<(), String> {
+    let mut command = windows_system_command("wsl.exe");
+    hide_windows_command(&mut command);
+    let status = command
+        .arg("-d")
+        .arg(&bridge.distro)
+        .arg("-e")
+        .arg("bash")
+        .arg("-lc")
+        .arg(r#"mkdir -p "$(dirname "$1")" && : > "$1""#)
+        .arg("factory-control-marker")
+        .arg(managed_marker_path(bridge))
+        .status()
+        .map_err(|err| format!("failed to write WSL managed marker: {err}"))?;
+
+    if status.success() {
+        Ok(())
+    } else {
+        Err("failed to write WSL managed marker".to_string())
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn clear_managed_marker(bridge: &WslBridge) -> Result<(), String> {
+    let mut command = windows_system_command("wsl.exe");
+    hide_windows_command(&mut command);
+    let status = command
+        .arg("-d")
+        .arg(&bridge.distro)
+        .arg("-e")
+        .arg("bash")
+        .arg("-lc")
+        .arg(r#"rm -f "$1""#)
+        .arg("factory-control-marker")
+        .arg(managed_marker_path(bridge))
+        .status()
+        .map_err(|err| format!("failed to clear WSL managed marker: {err}"))?;
+
+    if status.success() {
+        Ok(())
+    } else {
+        Err("failed to clear WSL managed marker".to_string())
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn managed_marker_path(bridge: &WslBridge) -> String {
+    format!(
+        "{}/factory-control-managed",
+        bridge.state_dir.trim_end_matches('/')
+    )
 }
