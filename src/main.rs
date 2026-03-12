@@ -2069,16 +2069,28 @@ fn is_port_open(host: &str, port: u16, timeout: Duration) -> bool {
 }
 
 fn is_http_ready(host: &str, port: u16, timeout: Duration) -> bool {
-    let Ok(client) = Client::builder().timeout(timeout).build() else {
+    let address = format!("{host}:{port}");
+    let Ok(socket_addr) = address.parse() else {
         return false;
     };
+    let Ok(mut stream) = std::net::TcpStream::connect_timeout(&socket_addr, timeout) else {
+        return false;
+    };
+    stream.set_read_timeout(Some(timeout)).ok();
+    stream.set_write_timeout(Some(timeout)).ok();
 
-    let url = format!("http://{host}:{port}/healthz");
-    client
-        .get(url)
-        .send()
-        .map(|response| response.status().is_success())
-        .unwrap_or(false)
+    let request =
+        format!("GET /healthz HTTP/1.1\r\nHost: {host}:{port}\r\nConnection: close\r\n\r\n");
+    if stream.write_all(request.as_bytes()).is_err() {
+        return false;
+    }
+
+    let mut response = [0_u8; 128];
+    let Ok(read) = stream.read(&mut response) else {
+        return false;
+    };
+    let status_line = String::from_utf8_lossy(&response[..read]);
+    status_line.starts_with("HTTP/1.1 200") || status_line.starts_with("HTTP/1.0 200")
 }
 
 fn epoch_seconds() -> i64 {
