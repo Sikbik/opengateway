@@ -15,6 +15,8 @@ use rand::Rng;
 use reqwest::blocking::Client;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet, VecDeque};
+#[cfg(windows)]
+use std::ffi::OsString;
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 #[cfg(unix)]
@@ -828,10 +830,12 @@ fn command_start(args: StartArgs) -> Result<()> {
     let timeout = args.timeout.max(0.1);
     let deadline = Instant::now() + Duration::from_secs_f64(timeout);
     while Instant::now() < deadline {
-        if is_http_ready(&args.host, args.port, Duration::from_millis(500)) {
-            let pid = read_pid(&paths.pid_file)
-                .or_else(|| child.as_ref().map(|process| process.id() as i32))
-                .unwrap_or_default();
+        let pid = read_pid(&paths.pid_file)
+            .or_else(|| child.as_ref().map(|process| process.id() as i32));
+        let http_ready = is_http_ready(&args.host, args.port, Duration::from_millis(500));
+        let port_ready = is_port_open(&args.host, args.port, Duration::from_millis(500));
+        if http_ready || (port_ready && pid.map(pid_running).unwrap_or(false)) {
+            let pid = pid.unwrap_or_default();
             println!(
                 "opengateway started (pid={pid}) on http://{}:{}",
                 args.host, args.port
@@ -850,6 +854,18 @@ fn command_start(args: StartArgs) -> Result<()> {
             }
         }
         thread::sleep(Duration::from_millis(200));
+    }
+
+    let pid = read_pid(&paths.pid_file).or_else(|| child.as_ref().map(|process| process.id() as i32));
+    let port_ready = is_port_open(&args.host, args.port, Duration::from_millis(500));
+    if port_ready && pid.map(pid_running).unwrap_or(false) {
+        let pid = pid.unwrap_or_default();
+        println!(
+            "opengateway started (pid={pid}) on http://{}:{}",
+            args.host, args.port
+        );
+        println!("log file: {}", paths.log_file.display());
+        return Ok(());
     }
 
     if let Some(child) = child.as_mut() {
@@ -1060,7 +1076,8 @@ fn command_status(args: StatusArgs) -> Result<()> {
     clear_stale_pid_file(&paths.pid_file);
     let pid = read_pid(&paths.pid_file);
     let front_up = is_http_ready(&args.host, args.port, Duration::from_millis(500));
-    let running = front_up || pid.map(pid_running).unwrap_or(false);
+    let port_up = is_port_open(&args.host, args.port, Duration::from_millis(300));
+    let running = front_up || port_up || pid.map(pid_running).unwrap_or(false);
 
     println!("running: {running}");
     println!(
@@ -1072,6 +1089,8 @@ fn command_status(args: StatusArgs) -> Result<()> {
         "front_proxy: {} ({}:{})",
         if front_up {
             "up"
+        } else if port_up {
+            "listening"
         } else {
             "down"
         },
@@ -1984,7 +2003,7 @@ fn pid_running(pid: i32) -> bool {
     #[cfg(windows)]
     {
         let filter = format!("PID eq {pid}");
-        let mut command = Command::new("tasklist");
+        let mut command = windows_system_command("tasklist");
         hidden_command(&mut command);
         let output = command
             .arg("/FO")
@@ -2022,7 +2041,7 @@ fn pid_running(pid: i32) -> bool {
 fn send_signal(pid: i32, signal: &str) -> Result<()> {
     #[cfg(windows)]
     {
-        let mut command = Command::new("taskkill");
+        let mut command = windows_system_command("taskkill");
         hidden_command(&mut command);
         command.arg("/PID").arg(pid.to_string()).arg("/T");
         if signal == "-KILL" {
@@ -2167,6 +2186,32 @@ fn configure_background_command(command: &mut Command) {
 fn hidden_command(command: &mut Command) -> &mut Command {
     command.creation_flags(CREATE_NO_WINDOW);
     command
+}
+
+#[cfg(windows)]
+fn windows_system_command(executable: &str) -> Command {
+    if let Some(path) = windows_system_executable(executable) {
+        return Command::new(path);
+    }
+    Command::new(executable)
+}
+
+#[cfg(windows)]
+fn windows_system_executable(executable: &str) -> Option<OsString> {
+    let system_root = std::env::var("SystemRoot")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            std::env::var("WINDIR")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+        })?;
+    Some(
+        PathBuf::from(system_root)
+            .join("System32")
+            .join(executable)
+            .into_os_string(),
+    )
 }
 
 #[cfg(test)]

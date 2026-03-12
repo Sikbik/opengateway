@@ -183,10 +183,13 @@ fn read_gateway_snapshot(
     factory: &FactorySnapshot,
 ) -> GatewaySnapshot {
     let pid = crate::read_pid(&paths.pid_file).map(|value| value as u32);
-    let health = match crate::is_http_ready("127.0.0.1", 42069, Duration::from_millis(500)) {
-        true if pid.is_some() => "online",
-        true => "degraded",
-        false => "offline",
+    let http_ready = crate::is_http_ready("127.0.0.1", 42069, Duration::from_millis(500));
+    let port_ready = crate::is_port_open("127.0.0.1", 42069, Duration::from_millis(300));
+    let health = match (http_ready, port_ready, pid.is_some()) {
+        (true, _, true) => "online",
+        (true, _, false) => "degraded",
+        (false, true, _) => "degraded",
+        (false, false, _) => "offline",
     };
 
     GatewaySnapshot {

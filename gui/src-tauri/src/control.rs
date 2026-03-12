@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::env;
+#[cfg(target_os = "windows")]
+use std::ffi::OsString;
 use std::path::PathBuf;
 use std::process::Command;
 use tauri::AppHandle;
@@ -14,7 +16,7 @@ use tauri_plugin_shell::ShellExt;
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 #[cfg(target_os = "windows")]
-static WSL_BRIDGE_CACHE: OnceLock<Option<WslBridge>> = OnceLock::new();
+static WSL_BRIDGE_CACHE: OnceLock<WslBridge> = OnceLock::new();
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -175,9 +177,13 @@ fn resolve_wsl_bridge() -> Option<WslBridge> {
         return probe_wsl_bridge(&distro, workspace);
     }
 
-    WSL_BRIDGE_CACHE
-        .get_or_init(|| detect_default_wsl_bridge().or_else(detect_any_wsl_bridge))
-        .clone()
+    if let Some(cached) = WSL_BRIDGE_CACHE.get() {
+        return Some(cached.clone());
+    }
+
+    let detected = detect_default_wsl_bridge().or_else(detect_any_wsl_bridge)?;
+    let _ = WSL_BRIDGE_CACHE.set(detected.clone());
+    Some(detected)
 }
 
 #[cfg(target_os = "windows")]
@@ -229,7 +235,7 @@ fn detect_default_wsl_bridge() -> Option<WslBridge> {
 
 #[cfg(target_os = "windows")]
 fn detect_any_wsl_bridge() -> Option<WslBridge> {
-    let mut command = Command::new("wsl.exe");
+    let mut command = windows_system_command("wsl.exe");
     hide_windows_command(&mut command);
     let output = command.arg("--list").arg("--quiet").output().ok()?;
     if !output.status.success() {
@@ -249,7 +255,7 @@ fn detect_any_wsl_bridge() -> Option<WslBridge> {
 
 #[cfg(target_os = "windows")]
 fn detect_default_wsl_distro() -> Option<String> {
-    let mut command = Command::new("wsl.exe");
+    let mut command = windows_system_command("wsl.exe");
     hide_windows_command(&mut command);
     let output = command.arg("--list").arg("--verbose").output().ok()?;
     if !output.status.success() {
@@ -272,7 +278,7 @@ fn detect_default_wsl_distro() -> Option<String> {
 
 #[cfg(target_os = "windows")]
 fn probe_wsl_bridge(distro: &str, workspace: Option<String>) -> Option<WslBridge> {
-    let mut command = Command::new("wsl.exe");
+    let mut command = windows_system_command("wsl.exe");
     hide_windows_command(&mut command);
     command.arg("-d").arg(distro);
     let output = command
@@ -435,7 +441,26 @@ fn wsl_unc_path(distro: &str, linux_path: &str) -> String {
     let normalized = expand_linux_path("", linux_path)
         .trim_start_matches('/')
         .replace('/', "\\");
-    format!(r"\\wsl.localhost\{distro}\{normalized}")
+    format!(r"\\wsl$\{distro}\{normalized}")
+}
+
+#[cfg(target_os = "windows")]
+fn windows_system_command(executable: &str) -> Command {
+    if let Some(path) = windows_system_executable(executable) {
+        return Command::new(path);
+    }
+    Command::new(executable)
+}
+
+#[cfg(target_os = "windows")]
+fn windows_system_executable(executable: &str) -> Option<OsString> {
+    let system_root = env_nonempty("SystemRoot").or_else(|| env_nonempty("WINDIR"))?;
+    Some(
+        PathBuf::from(system_root)
+            .join("System32")
+            .join(executable)
+            .into_os_string(),
+    )
 }
 
 #[cfg(target_os = "windows")]
