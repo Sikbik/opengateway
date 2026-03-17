@@ -1,3 +1,4 @@
+mod acp;
 mod auth_store;
 mod gui_api;
 mod oauth;
@@ -87,6 +88,8 @@ enum Commands {
     Init(InitArgs),
     Setup(SetupArgs),
     SyncFactory(SyncFactoryArgs),
+    #[command(hide = true)]
+    Acp(acp::cli::AcpArgs),
     #[command(alias = "gui")]
     Control(ControlArgs),
     Start(StartArgs),
@@ -433,6 +436,7 @@ fn run_cli() -> Result<()> {
         Commands::Init(args) => command_init(args),
         Commands::Setup(args) => command_setup(args),
         Commands::SyncFactory(args) => command_sync_factory(args),
+        Commands::Acp(args) => acp::cli::command_acp(args),
         Commands::Control(args) => command_control(args),
         Commands::Start(args) => command_start(args),
         Commands::Run(args) => command_run(args),

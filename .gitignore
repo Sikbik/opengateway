@@ -20,6 +20,7 @@
 # Local agent and planning docs
 /AGENTS.md
 /.local-docs/
+/docs/
 /.factory/droids/
 
 # GUI build artifacts

@@ -16,6 +16,10 @@ pub struct AppPaths {
     pub default_config: PathBuf,
     pub auth_dir: PathBuf,
     pub api_key_file: PathBuf,
+    pub acp_dir: PathBuf,
+    pub acp_sessions_dir: PathBuf,
+    pub acp_logs_dir: PathBuf,
+    pub acp_tmp_dir: PathBuf,
 }
 
 #[derive(Debug, Clone)]
@@ -40,6 +44,7 @@ pub fn build_paths() -> Result<AppPaths> {
     let data_dir = env_path("OPENGATEWAY_DATA_DIR", &xdg_data.join(APP_NAME), &home);
     let config_dir = env_path("OPENGATEWAY_CONFIG_DIR", &xdg_config.join(APP_NAME), &home);
     let auth_dir = env_path("OPENGATEWAY_AUTH_DIR", &config_dir.join("auth"), &home);
+    let acp_dir = state_dir.join("acp");
 
     Ok(AppPaths {
         log_file: state_dir.join("opengateway.log"),
@@ -50,6 +55,10 @@ pub fn build_paths() -> Result<AppPaths> {
         data_dir,
         config_dir,
         auth_dir,
+        acp_sessions_dir: acp_dir.join("sessions"),
+        acp_logs_dir: acp_dir.join("logs"),
+        acp_tmp_dir: acp_dir.join("tmp"),
+        acp_dir,
     })
 }
 
@@ -69,6 +78,18 @@ impl AppPaths {
         })?;
         fs::create_dir_all(&self.auth_dir)
             .with_context(|| format!("failed to create auth dir {}", self.auth_dir.display()))?;
+        fs::create_dir_all(&self.acp_sessions_dir).with_context(|| {
+            format!(
+                "failed to create ACP sessions dir {}",
+                self.acp_sessions_dir.display()
+            )
+        })?;
+        fs::create_dir_all(&self.acp_logs_dir).with_context(|| {
+            format!("failed to create ACP logs dir {}", self.acp_logs_dir.display())
+        })?;
+        fs::create_dir_all(&self.acp_tmp_dir).with_context(|| {
+            format!("failed to create ACP tmp dir {}", self.acp_tmp_dir.display())
+        })?;
         Ok(())
     }
 }
