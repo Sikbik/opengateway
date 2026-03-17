@@ -1,7 +1,7 @@
 use super::adapters::supported_agents;
 use super::capabilities::planned_capabilities;
 use super::errors::error_categories;
-use super::journal::scaffold_session_files;
+use super::journal::{collect_session_summaries, scaffold_session_files};
 use super::protocol::JSONRPC_VERSION;
 use super::redact::redact_text;
 use super::session::session_states;
@@ -20,6 +20,8 @@ pub fn render_doctor_report(paths: &AppPaths) -> String {
     let states = session_states().join(", ");
     let redaction_ready =
         redact_text("Authorization: Bearer acp-scaffold-secret") != "Authorization: Bearer acp-scaffold-secret";
+    let session_summaries = collect_session_summaries(paths).unwrap_or_default();
+    let latest_session = session_summaries.first();
 
     format!(
         "\
@@ -44,6 +46,9 @@ paths:
   tmp: {tmp}
   scaffold-journal: {journal}
   scaffold-log: {session_log}
+recorded-sessions: {session_count}
+latest-session: {latest_session}
+latest-event: {latest_event}
 session-states: {states}
 error-categories: {error_categories}
 redaction-ready: {redaction_ready}
@@ -64,6 +69,13 @@ redaction-ready: {redaction_ready}
         tmp = paths.acp_tmp_dir.display(),
         journal = sample_files.journal_path.display(),
         session_log = sample_files.log_path.display(),
+        session_count = session_summaries.len(),
+        latest_session = latest_session
+            .map(|session| session.session_id.as_str())
+            .unwrap_or("none"),
+        latest_event = latest_session
+            .and_then(|session| session.last_event.as_deref())
+            .unwrap_or("none"),
         states = states,
         error_categories = error_categories().join(", "),
         redaction_ready = yes_no(redaction_ready),
@@ -85,5 +97,6 @@ mod tests {
         let report = render_doctor_report(&paths);
         assert!(report.contains("experimental: yes"));
         assert!(report.contains("loadSession: no"));
+        assert!(report.contains("recorded-sessions:"));
     }
 }
