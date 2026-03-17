@@ -1,6 +1,6 @@
 use super::adapters::AgentKind;
 use super::errors::{
-    INVALID_REQUEST, METHOD_NOT_FOUND, PARSE_ERROR, SERVER_NOT_INITIALIZED,
+    INTERNAL_ERROR, INVALID_REQUEST, METHOD_NOT_FOUND, PARSE_ERROR, SERVER_NOT_INITIALIZED,
 };
 use super::journal::{append_journal_event, append_session_log};
 use super::protocol::{
@@ -8,7 +8,8 @@ use super::protocol::{
     JSONRPC_VERSION,
 };
 use super::redact::redact_text;
-use super::session::{CancelParams, NewSessionParams, PromptParams, SessionRegistry};
+use super::session::{CancelParams, NewSessionParams, PromptParams};
+use super::supervisor::{CancelOutcome, RuntimeMode, SessionSupervisor};
 use crate::paths::AppPaths;
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
@@ -22,14 +23,14 @@ pub struct ServeConfig {
     pub agent: AgentKind,
     pub workspace: Option<PathBuf>,
     pub paths: Option<AppPaths>,
+    pub runtime_mode: RuntimeMode,
 }
 
 #[derive(Debug)]
 struct ServerState {
-    agent: AgentKind,
     initialized: bool,
     shutdown_requested: bool,
-    sessions: SessionRegistry,
+    supervisor: SessionSupervisor,
 }
 
 enum LoopControl {
@@ -62,10 +63,9 @@ where
     )?;
 
     let mut state = ServerState {
-        agent: config.agent,
         initialized: false,
         shutdown_requested: false,
-        sessions: SessionRegistry::default(),
+        supervisor: SessionSupervisor::new(config.runtime_mode),
     };
     let mut frame = String::new();
     loop {
@@ -142,6 +142,10 @@ where
                 break;
             }
         }
+    }
+
+    if let Err(error) = state.supervisor.shutdown_all() {
+        log_line(log, &format!("failed to clean up ACP sessions on shutdown: {error}"))?;
     }
 
     Ok(())
@@ -260,33 +264,34 @@ where
                     return Ok(LoopControl::Continue);
                 }
             };
-            if !params.cwd.is_absolute() {
-                write_message(
-                    output,
-                    &error_response(
-                        Some(id),
-                        RpcError::new(
-                            INVALID_REQUEST,
-                            "session/new requires an absolute cwd",
-                            Some(json!({ "cwd": params.cwd })),
+            let session = match state.supervisor.create(config.agent, params) {
+                Ok(session) => session,
+                Err(error) => {
+                    write_message(
+                        output,
+                        &error_response(
+                            Some(id),
+                            RpcError::new(
+                                INTERNAL_ERROR,
+                                "failed to create ACP session",
+                                Some(json!({ "detail": error.to_string() })),
+                            ),
                         ),
-                    ),
-                )?;
-                return Ok(LoopControl::Continue);
-            }
-
-            let session = state.sessions.create(state.agent, params);
+                    )?;
+                    return Ok(LoopControl::Continue);
+                }
+            };
             log_line(
                 log,
-                &format!("acp session created: {} ({})", session.id, session.cwd.display()),
+                &format!("acp session created: {} ({})", session.session_id, session.cwd.display()),
             )?;
             record_session_event(
                 config,
                 log,
-                &session.id,
+                &session.session_id,
                 "session.created",
                 json!({
-                    "agent": session.agent.as_str(),
+                    "agent": config.agent.as_str(),
                     "cwd": session.cwd.display().to_string(),
                     "mcpServers": session.mcp_server_count,
                 }),
@@ -294,7 +299,7 @@ where
             record_session_log(
                 config,
                 log,
-                &session.id,
+                &session.session_id,
                 &format!("created session in {}", session.cwd.display()),
             )?;
             write_message(
@@ -302,7 +307,7 @@ where
                 &success_response(
                     id,
                     json!({
-                        "sessionId": session.id,
+                        "sessionId": session.session_id,
                     }),
                 ),
             )?;
@@ -340,7 +345,7 @@ where
                     return Ok(LoopControl::Continue);
                 }
             };
-            let Some(session) = state.sessions.get_mut(&params.session_id) else {
+            if !state.supervisor.contains(&params.session_id) {
                 write_message(
                     output,
                     &error_response(
@@ -353,22 +358,36 @@ where
                     ),
                 )?;
                 return Ok(LoopControl::Continue);
-            };
+            }
 
-            let reply = session.build_mock_reply(&params);
-            let session_id = session.id.clone();
-            let prompt_count = session.prompt_count;
+            let prompt = match state.supervisor.prompt(params.clone()) {
+                Ok(prompt) => prompt,
+                Err(error) => {
+                    write_message(
+                        output,
+                        &error_response(
+                            Some(id),
+                            RpcError::new(
+                                INTERNAL_ERROR,
+                                "failed to run ACP session prompt",
+                                Some(json!({ "detail": error.to_string() })),
+                            ),
+                        ),
+                    )?;
+                    return Ok(LoopControl::Continue);
+                }
+            };
             write_message(
                 output,
                 &notification(
                     "session/update",
                     json!({
-                        "sessionId": session_id,
+                        "sessionId": prompt.session_id,
                         "update": {
                             "sessionUpdate": "agent_message_chunk",
                             "content": {
                                 "type": "text",
-                                "text": reply,
+                                "text": prompt.reply_text,
                             }
                         }
                     }),
@@ -377,19 +396,23 @@ where
             record_session_event(
                 config,
                 log,
-                &session.id,
+                &prompt.session_id,
                 "prompt.completed",
                 json!({
-                    "promptCount": prompt_count,
-                    "userMessageId": params.message_id.clone(),
+                    "promptCount": prompt.prompt_count,
+                    "userMessageId": prompt.message_id.clone(),
                     "promptBlocks": params.prompt.len(),
                 }),
             )?;
             record_session_log(
                 config,
                 log,
-                &session.id,
-                &format!("completed prompt {} with {} block(s)", prompt_count, params.prompt.len()),
+                &prompt.session_id,
+                &format!(
+                    "completed prompt {} with {} block(s)",
+                    prompt.prompt_count,
+                    params.prompt.len()
+                ),
             )?;
             write_message(
                 output,
@@ -397,7 +420,7 @@ where
                     id,
                     json!({
                         "stopReason": "end_turn",
-                        "userMessageId": params.message_id,
+                        "userMessageId": prompt.message_id,
                     }),
                 ),
             )?;
@@ -426,26 +449,35 @@ where
                 }
             };
 
-            if state.sessions.contains(&params.session_id) {
-                log_line(log, &format!("acp mock cancel acknowledged for {}", params.session_id))?;
-                record_session_event(
-                    config,
-                    log,
-                    &params.session_id,
-                    "session.cancel",
-                    json!({}),
-                )?;
-                record_session_log(
-                    config,
-                    log,
-                    &params.session_id,
-                    "cancel notification received",
-                )?;
-            } else {
-                log_line(
-                    log,
-                    &format!("acp mock cancel ignored for unknown session {}", params.session_id),
-                )?;
+            match state.supervisor.cancel(params.clone()) {
+                Ok(CancelOutcome::Cancelled) => {
+                    log_line(log, &format!("acp session cancelled {}", params.session_id))?;
+                    record_session_event(
+                        config,
+                        log,
+                        &params.session_id,
+                        "session.cancel",
+                        json!({}),
+                    )?;
+                    record_session_log(
+                        config,
+                        log,
+                        &params.session_id,
+                        "cancel notification received",
+                    )?;
+                }
+                Ok(CancelOutcome::UnknownSession) => {
+                    log_line(
+                        log,
+                        &format!("acp mock cancel ignored for unknown session {}", params.session_id),
+                    )?;
+                }
+                Err(error) => {
+                    log_line(
+                        log,
+                        &format!("failed to cancel ACP session {}: {error}", params.session_id),
+                    )?;
+                }
             }
         }
         "exit" => {
@@ -541,7 +573,7 @@ fn record_session_log<L: Write>(
 
 #[cfg(test)]
 mod tests {
-    use super::{serve_stdio, ServeConfig};
+    use super::{serve_stdio, RuntimeMode, ServeConfig};
     use crate::acp::adapters::AgentKind;
     use serde_json::Value;
     use std::io::Cursor;
@@ -555,6 +587,7 @@ mod tests {
                 agent: AgentKind::Codex,
                 workspace: None,
                 paths: None,
+                runtime_mode: RuntimeMode::InProcessMock,
             },
             Cursor::new(input.as_bytes()),
             &mut output,
@@ -606,7 +639,7 @@ mod tests {
     fn session_new_and_prompt_use_mock_lifecycle() {
         let (messages, _) = run_server(
             "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}\n\
-             {\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"session/new\",\"params\":{\"cwd\":\"/workspace\",\"mcpServers\":[]}}\n\
+             {\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"session/new\",\"params\":{\"cwd\":\"/tmp\",\"mcpServers\":[]}}\n\
              {\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"session-000001\",\"prompt\":[{\"type\":\"text\",\"text\":\"hello world\"}],\"messageId\":\"user-1\"}}\n",
         );
 

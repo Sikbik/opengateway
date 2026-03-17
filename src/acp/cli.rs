@@ -1,6 +1,7 @@
 use super::adapters::AgentKind;
 use super::capabilities::planned_capabilities;
 use super::doctor;
+use super::supervisor::RuntimeMode;
 use super::transport::{serve_stdio, ServeConfig};
 use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
@@ -78,6 +79,7 @@ fn command_serve(args: AcpServeArgs) -> Result<()> {
             agent: args.agent,
             workspace,
             paths: Some(paths.clone()),
+            runtime_mode: RuntimeMode::ProcessMock,
         },
         BufReader::new(stdin.lock()),
         &mut stdout.lock(),

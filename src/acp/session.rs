@@ -1,32 +1,16 @@
 use super::adapters::AgentKind;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::HashMap;
 use std::path::PathBuf;
 
-#[derive(Debug, Default)]
-pub struct SessionRegistry {
-    next_id: u64,
-    entries: HashMap<String, MockSession>,
-}
-
-#[derive(Debug, Clone)]
-pub struct MockSession {
-    pub id: String,
-    pub agent: AgentKind,
-    pub cwd: PathBuf,
-    pub mcp_server_count: usize,
-    pub prompt_count: u64,
-}
-
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NewSessionParams {
     pub cwd: PathBuf,
     pub mcp_servers: Vec<Value>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PromptParams {
     pub session_id: String,
@@ -35,13 +19,13 @@ pub struct PromptParams {
     pub message_id: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CancelParams {
     pub session_id: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct PromptBlock {
     #[serde(rename = "type")]
     pub kind: String,
@@ -49,30 +33,26 @@ pub struct PromptBlock {
     pub text: Option<String>,
 }
 
-impl SessionRegistry {
-    pub fn create(&mut self, agent: AgentKind, params: NewSessionParams) -> MockSession {
-        self.next_id += 1;
-        let session = MockSession {
-            id: format!("session-{:06}", self.next_id),
+#[derive(Debug, Clone)]
+pub struct InProcessMockSession {
+    pub id: String,
+    pub agent: AgentKind,
+    pub cwd: PathBuf,
+    pub mcp_server_count: usize,
+    pub prompt_count: u64,
+}
+
+impl InProcessMockSession {
+    pub fn new(id: String, agent: AgentKind, params: NewSessionParams) -> Self {
+        Self {
+            id,
             agent,
             cwd: params.cwd,
             mcp_server_count: params.mcp_servers.len(),
             prompt_count: 0,
-        };
-        self.entries.insert(session.id.clone(), session.clone());
-        session
+        }
     }
 
-    pub fn get_mut(&mut self, session_id: &str) -> Option<&mut MockSession> {
-        self.entries.get_mut(session_id)
-    }
-
-    pub fn contains(&self, session_id: &str) -> bool {
-        self.entries.contains_key(session_id)
-    }
-}
-
-impl MockSession {
     pub fn build_mock_reply(&mut self, prompt: &PromptParams) -> String {
         self.prompt_count += 1;
         let text_blocks = prompt
@@ -120,34 +100,13 @@ pub fn session_states() -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{MockSession, NewSessionParams, PromptBlock, PromptParams, SessionRegistry};
+    use super::{InProcessMockSession, NewSessionParams, PromptBlock, PromptParams};
     use crate::acp::adapters::AgentKind;
     use std::path::PathBuf;
 
     #[test]
-    fn session_registry_creates_incrementing_ids() {
-        let mut sessions = SessionRegistry::default();
-        let first = sessions.create(
-            AgentKind::Codex,
-            NewSessionParams {
-                cwd: PathBuf::from("/tmp"),
-                mcp_servers: vec![],
-            },
-        );
-        let second = sessions.create(
-            AgentKind::Codex,
-            NewSessionParams {
-                cwd: PathBuf::from("/tmp"),
-                mcp_servers: vec![],
-            },
-        );
-        assert_eq!(first.id, "session-000001");
-        assert_eq!(second.id, "session-000002");
-    }
-
-    #[test]
     fn mock_reply_prefers_text_content() {
-        let mut session = MockSession {
+        let mut session = InProcessMockSession {
             id: "session-000001".to_string(),
             agent: AgentKind::Codex,
             cwd: PathBuf::from("/workspace"),
@@ -170,5 +129,18 @@ mod tests {
         });
         assert!(reply.contains("received: hello"));
         assert_eq!(session.prompt_count, 1);
+    }
+
+    #[test]
+    fn new_mock_session_tracks_mcp_server_count() {
+        let session = InProcessMockSession::new(
+            "session-000001".to_string(),
+            AgentKind::Codex,
+            NewSessionParams {
+                cwd: PathBuf::from("/tmp"),
+                mcp_servers: vec![serde_json::json!({"name": "demo"})],
+            },
+        );
+        assert_eq!(session.mcp_server_count, 1);
     }
 }
