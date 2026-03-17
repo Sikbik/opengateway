@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 
 pub const PROCESS_MODEL: &str = "one-session-one-subprocess";
 const CANCEL_TIMEOUT: Duration = Duration::from_millis(400);
+const MAX_ACTIVE_SESSIONS: usize = 8;
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
@@ -103,7 +104,11 @@ impl SessionSupervisor {
     }
 
     pub fn create(&mut self, agent: AgentKind, params: NewSessionParams) -> Result<SessionCreated> {
+        self.reap_exited()?;
         validate_session_cwd(&params.cwd)?;
+        if self.sessions.len() >= MAX_ACTIVE_SESSIONS {
+            bail!("ACP session limit reached ({MAX_ACTIVE_SESSIONS})");
+        }
 
         self.next_id += 1;
         let session_id = format!("session-{:06}", self.next_id);
@@ -126,17 +131,19 @@ impl SessionSupervisor {
         Ok(created)
     }
 
-    pub fn contains(&self, session_id: &str) -> bool {
+    pub fn contains(&mut self, session_id: &str) -> bool {
+        let _ = self.reap_exited();
         self.sessions.contains_key(session_id)
     }
 
     pub fn prompt(&mut self, params: PromptParams) -> Result<PromptOutcome> {
-        let handle = self
+        let session_id = params.session_id.clone();
+        let mut handle = self
             .sessions
-            .get_mut(&params.session_id)
-            .ok_or_else(|| anyhow!("unknown session: {}", params.session_id))?;
+            .remove(&session_id)
+            .ok_or_else(|| anyhow!("unknown session: {}", session_id))?;
 
-        match handle {
+        let result = match &mut handle {
             SessionHandle::InProcess(session) => {
                 let reply_text = session.build_mock_reply(&params);
                 Ok(PromptOutcome {
@@ -147,7 +154,12 @@ impl SessionSupervisor {
                 })
             }
             SessionHandle::Process(session) => session.prompt(params),
+        };
+
+        if result.is_ok() {
+            self.sessions.insert(session_id, handle);
         }
+        result
     }
 
     pub fn cancel(&mut self, params: CancelParams) -> Result<CancelOutcome> {
@@ -169,6 +181,27 @@ impl SessionSupervisor {
             if let SessionHandle::Process(session) = &mut handle {
                 session.cancel()?;
             }
+        }
+        Ok(())
+    }
+
+    fn reap_exited(&mut self) -> Result<()> {
+        let mut exited = Vec::new();
+        for (session_id, handle) in &mut self.sessions {
+            if let SessionHandle::Process(session) = handle {
+                if session
+                    .child
+                    .try_wait()
+                    .with_context(|| format!("failed to poll ACP runtime for {}", session_id))?
+                    .is_some()
+                {
+                    exited.push(session_id.clone());
+                }
+            }
+        }
+
+        for session_id in exited {
+            self.sessions.remove(&session_id);
         }
         Ok(())
     }
@@ -389,7 +422,7 @@ fn apply_allowed_env(command: &mut Command) {
 
 #[cfg(test)]
 mod tests {
-    use super::{CancelOutcome, RuntimeMode, SessionSupervisor};
+    use super::{CancelOutcome, RuntimeMode, SessionSupervisor, MAX_ACTIVE_SESSIONS};
     use crate::acp::adapters::AgentKind;
     use crate::acp::session::{CancelParams, NewSessionParams, PromptBlock, PromptParams};
     use std::path::PathBuf;
@@ -437,5 +470,32 @@ mod tests {
             })
             .expect("cancel");
         assert_eq!(cancelled, CancelOutcome::UnknownSession);
+    }
+
+    #[test]
+    fn supervisor_enforces_active_session_cap() {
+        let mut supervisor = SessionSupervisor::new(RuntimeMode::InProcessMock);
+        for _ in 0..MAX_ACTIVE_SESSIONS {
+            supervisor
+                .create(
+                    AgentKind::Codex,
+                    NewSessionParams {
+                        cwd: PathBuf::from("/tmp"),
+                        mcp_servers: vec![],
+                    },
+                )
+                .expect("create within cap");
+        }
+
+        let error = supervisor
+            .create(
+                AgentKind::Codex,
+                NewSessionParams {
+                    cwd: PathBuf::from("/tmp"),
+                    mcp_servers: vec![],
+                },
+            )
+            .expect_err("cap should reject");
+        assert!(error.to_string().contains("session limit reached"));
     }
 }
