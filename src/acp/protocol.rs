@@ -12,6 +12,8 @@ pub struct RpcRequest {
     pub id: Option<Value>,
     #[serde(default)]
     pub method: Option<String>,
+    #[serde(default)]
+    pub params: Option<Value>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -51,13 +53,27 @@ pub fn error_response(id: Option<Value>, error: RpcError) -> Value {
 pub fn initialize_result() -> Value {
     json!({
         "protocolVersion": ACP_PROTOCOL_VERSION,
-        "capabilities": {
+        "agentCapabilities": {
             "loadSession": false,
             "promptCapabilities": {
                 "image": false,
                 "audio": false,
                 "embeddedContext": false
             }
+        },
+        "authMethods": [],
+        "agentInfo": {
+            "name": "opengateway",
+            "title": "OpenGateway ACP (Experimental)",
+            "version": env!("CARGO_PKG_VERSION")
         }
+    })
+}
+
+pub fn notification(method: &str, params: Value) -> Value {
+    json!({
+        "jsonrpc": JSONRPC_VERSION,
+        "method": method,
+        "params": params,
     })
 }

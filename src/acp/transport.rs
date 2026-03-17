@@ -3,9 +3,11 @@ use super::errors::{
     INVALID_REQUEST, METHOD_NOT_FOUND, PARSE_ERROR, SERVER_NOT_INITIALIZED,
 };
 use super::protocol::{
-    error_response, initialize_result, success_response, RpcError, RpcRequest, JSONRPC_VERSION,
+    error_response, initialize_result, notification, success_response, RpcError, RpcRequest,
+    JSONRPC_VERSION,
 };
 use super::redact::redact_text;
+use super::session::{CancelParams, NewSessionParams, PromptParams, SessionRegistry};
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
 use std::io::{BufRead, Write};
@@ -19,10 +21,12 @@ pub struct ServeConfig {
     pub workspace: Option<PathBuf>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct ServerState {
+    agent: AgentKind,
     initialized: bool,
     shutdown_requested: bool,
+    sessions: SessionRegistry,
 }
 
 enum LoopControl {
@@ -54,7 +58,12 @@ where
         ),
     )?;
 
-    let mut state = ServerState::default();
+    let mut state = ServerState {
+        agent: config.agent,
+        initialized: false,
+        shutdown_requested: false,
+        sessions: SessionRegistry::default(),
+    };
     let mut frame = String::new();
     loop {
         frame.clear();
@@ -198,9 +207,6 @@ where
             state.shutdown_requested = true;
             write_message(output, &success_response(id, json!({})))?;
         }
-        "exit" => {
-            return Ok(LoopControl::Exit);
-        }
         other if !state.initialized => {
             if request.id.is_some() {
                 write_message(
@@ -220,6 +226,180 @@ where
                     &format!("ignored ACP notification before initialize: {other}"),
                 )?;
             }
+        }
+        "session/new" => {
+            let Some(id) = request.id else {
+                write_message(
+                    output,
+                    &error_response(
+                        None,
+                        RpcError::new(INVALID_REQUEST, "session/new must be sent as a request", None),
+                    ),
+                )?;
+                return Ok(LoopControl::Continue);
+            };
+
+            let params: NewSessionParams = match decode_params(request.params, "session/new") {
+                Ok(params) => params,
+                Err(error) => {
+                    write_message(
+                        output,
+                        &error_response(
+                            Some(id),
+                            RpcError::new(
+                                INVALID_REQUEST,
+                                "invalid params for session/new",
+                                Some(json!({ "detail": error.to_string() })),
+                            ),
+                        ),
+                    )?;
+                    return Ok(LoopControl::Continue);
+                }
+            };
+            if !params.cwd.is_absolute() {
+                write_message(
+                    output,
+                    &error_response(
+                        Some(id),
+                        RpcError::new(
+                            INVALID_REQUEST,
+                            "session/new requires an absolute cwd",
+                            Some(json!({ "cwd": params.cwd })),
+                        ),
+                    ),
+                )?;
+                return Ok(LoopControl::Continue);
+            }
+
+            let session = state.sessions.create(state.agent, params);
+            log_line(
+                log,
+                &format!("acp session created: {} ({})", session.id, session.cwd.display()),
+            )?;
+            write_message(
+                output,
+                &success_response(
+                    id,
+                    json!({
+                        "sessionId": session.id,
+                    }),
+                ),
+            )?;
+        }
+        "session/prompt" => {
+            let Some(id) = request.id else {
+                write_message(
+                    output,
+                    &error_response(
+                        None,
+                        RpcError::new(
+                            INVALID_REQUEST,
+                            "session/prompt must be sent as a request",
+                            None,
+                        ),
+                    ),
+                )?;
+                return Ok(LoopControl::Continue);
+            };
+
+            let params: PromptParams = match decode_params(request.params, "session/prompt") {
+                Ok(params) => params,
+                Err(error) => {
+                    write_message(
+                        output,
+                        &error_response(
+                            Some(id),
+                            RpcError::new(
+                                INVALID_REQUEST,
+                                "invalid params for session/prompt",
+                                Some(json!({ "detail": error.to_string() })),
+                            ),
+                        ),
+                    )?;
+                    return Ok(LoopControl::Continue);
+                }
+            };
+            let Some(session) = state.sessions.get_mut(&params.session_id) else {
+                write_message(
+                    output,
+                    &error_response(
+                        Some(id),
+                        RpcError::new(
+                            INVALID_REQUEST,
+                            "session/prompt references an unknown sessionId",
+                            Some(json!({ "sessionId": params.session_id })),
+                        ),
+                    ),
+                )?;
+                return Ok(LoopControl::Continue);
+            };
+
+            let reply = session.build_mock_reply(&params);
+            write_message(
+                output,
+                &notification(
+                    "session/update",
+                    json!({
+                        "sessionId": session.id,
+                        "update": {
+                            "sessionUpdate": "agent_message_chunk",
+                            "content": {
+                                "type": "text",
+                                "text": reply,
+                            }
+                        }
+                    }),
+                ),
+            )?;
+            write_message(
+                output,
+                &success_response(
+                    id,
+                    json!({
+                        "stopReason": "end_turn",
+                        "userMessageId": params.message_id,
+                    }),
+                ),
+            )?;
+        }
+        "session/cancel" => {
+            if request.id.is_some() {
+                write_message(
+                    output,
+                    &error_response(
+                        request.id,
+                        RpcError::new(
+                            INVALID_REQUEST,
+                            "session/cancel must be sent as a notification",
+                            None,
+                        ),
+                    ),
+                )?;
+                return Ok(LoopControl::Continue);
+            }
+
+            let params: CancelParams = match decode_params(request.params, "session/cancel") {
+                Ok(params) => params,
+                Err(error) => {
+                    log_line(log, &format!("invalid session/cancel notification: {error}"))?;
+                    return Ok(LoopControl::Continue);
+                }
+            };
+
+            if state.sessions.contains(&params.session_id) {
+                log_line(log, &format!("acp mock cancel acknowledged for {}", params.session_id))?;
+            } else {
+                log_line(
+                    log,
+                    &format!("acp mock cancel ignored for unknown session {}", params.session_id),
+                )?;
+            }
+        }
+        "exit" => {
+            if !state.shutdown_requested {
+                log_line(log, "acp exit received without prior shutdown request")?;
+            }
+            return Ok(LoopControl::Exit);
         }
         other => {
             if request.id.is_some() {
@@ -250,6 +430,15 @@ fn write_message<W: Write>(output: &mut W, value: &Value) -> Result<()> {
         .context("failed to terminate ACP response")?;
     output.flush().context("failed to flush ACP response")?;
     Ok(())
+}
+
+fn decode_params<T>(params: Option<Value>, method: &str) -> Result<T>
+where
+    T: serde::de::DeserializeOwned,
+{
+    serde_json::from_value(params.unwrap_or(Value::Null)).with_context(|| {
+        format!("invalid params for {method}")
+    })
 }
 
 fn log_line<L: Write>(log: &mut L, message: &str) -> Result<()> {
@@ -300,11 +489,12 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0]["id"], 1);
         assert_eq!(messages[0]["result"]["protocolVersion"], 1);
-        assert_eq!(messages[0]["result"]["capabilities"]["loadSession"], false);
+        assert_eq!(messages[0]["result"]["agentCapabilities"]["loadSession"], false);
         assert_eq!(
-            messages[0]["result"]["capabilities"]["promptCapabilities"]["embeddedContext"],
+            messages[0]["result"]["agentCapabilities"]["promptCapabilities"]["embeddedContext"],
             false
         );
+        assert_eq!(messages[0]["result"]["agentInfo"]["name"], "opengateway");
     }
 
     #[test]
@@ -320,17 +510,36 @@ mod tests {
     }
 
     #[test]
-    fn unknown_methods_return_method_not_found_after_initialize() {
+    fn session_new_and_prompt_use_mock_lifecycle() {
         let (messages, _) = run_server(
             "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}\n\
-             {\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"session/new\",\"params\":{}}\n",
+             {\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"session/new\",\"params\":{\"cwd\":\"/workspace\",\"mcpServers\":[]}}\n\
+             {\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"session-000001\",\"prompt\":[{\"type\":\"text\",\"text\":\"hello world\"}],\"messageId\":\"user-1\"}}\n",
+        );
+
+        assert_eq!(messages.len(), 4);
+        assert_eq!(messages[1]["result"]["sessionId"], "session-000001");
+        assert_eq!(messages[2]["method"], "session/update");
+        assert_eq!(
+            messages[2]["params"]["update"]["sessionUpdate"],
+            "agent_message_chunk"
+        );
+        assert_eq!(messages[3]["result"]["stopReason"], "end_turn");
+        assert_eq!(messages[3]["result"]["userMessageId"], "user-1");
+    }
+
+    #[test]
+    fn prompt_rejects_unknown_session_ids() {
+        let (messages, _) = run_server(
+            "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}\n\
+             {\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"missing\",\"prompt\":[{\"type\":\"text\",\"text\":\"hello\"}]}}\n",
         );
 
         assert_eq!(messages.len(), 2);
-        assert_eq!(messages[1]["error"]["code"], -32601);
+        assert_eq!(messages[1]["error"]["code"], -32600);
         assert_eq!(
             messages[1]["error"]["message"],
-            "unsupported ACP method: session/new"
+            "session/prompt references an unknown sessionId"
         );
     }
 
