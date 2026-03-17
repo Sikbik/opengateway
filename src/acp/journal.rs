@@ -1,5 +1,8 @@
+use anyhow::{Context, Result};
 use crate::paths::AppPaths;
 use serde_json::{json, Value};
+use std::cmp::Reverse;
+use std::fs;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::PathBuf;
@@ -9,6 +12,17 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub struct SessionFiles {
     pub journal_path: PathBuf,
     pub log_path: PathBuf,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct SessionSummary {
+    pub session_id: String,
+    pub prompt_count: usize,
+    pub cwd: Option<String>,
+    pub last_event: Option<String>,
+    pub journal_path: PathBuf,
+    pub log_path: PathBuf,
+    pub last_timestamp_ms: Option<u128>,
 }
 
 pub fn scaffold_session_files(paths: &AppPaths) -> SessionFiles {
@@ -23,6 +37,67 @@ pub fn session_files(paths: &AppPaths, session_id: &str) -> SessionFiles {
             .join(format!("{safe_session_id}.jsonl")),
         log_path: paths.acp_logs_dir.join(format!("{safe_session_id}.log")),
     }
+}
+
+pub fn collect_session_summaries(paths: &AppPaths) -> Result<Vec<SessionSummary>> {
+    let mut sessions = Vec::new();
+    for entry in fs::read_dir(&paths.acp_sessions_dir)
+        .with_context(|| format!("failed to read {}", paths.acp_sessions_dir.display()))?
+    {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
+            continue;
+        }
+
+        let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
+            continue;
+        };
+
+        let files = session_files(paths, stem);
+        let mut summary = SessionSummary {
+            session_id: stem.to_string(),
+            prompt_count: 0,
+            cwd: None,
+            last_event: None,
+            journal_path: files.journal_path,
+            log_path: files.log_path,
+            last_timestamp_ms: None,
+        };
+
+        let contents = fs::read_to_string(&summary.journal_path)
+            .with_context(|| format!("failed to read {}", summary.journal_path.display()))?;
+        for line in contents.lines().filter(|line| !line.trim().is_empty()) {
+            let value: Value = serde_json::from_str(line)
+                .with_context(|| format!("invalid ACP journal line in {}", summary.journal_path.display()))?;
+            if let Some(ts) = value.get("ts").and_then(Value::as_u64) {
+                summary.last_timestamp_ms = Some(ts as u128);
+            }
+            if let Some(event) = value.get("event").and_then(Value::as_str) {
+                summary.last_event = Some(event.to_string());
+                if event == "prompt.completed" {
+                    summary.prompt_count += 1;
+                }
+            }
+            if summary.cwd.is_none() {
+                summary.cwd = value
+                    .get("data")
+                    .and_then(|data| data.get("cwd"))
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
+            }
+        }
+
+        sessions.push(summary);
+    }
+
+    sessions.sort_by_key(|session| {
+        Reverse((
+            session.last_timestamp_ms.unwrap_or_default(),
+            session.session_id.clone(),
+        ))
+    });
+    Ok(sessions)
 }
 
 pub fn append_journal_event(
@@ -91,7 +166,9 @@ fn unix_timestamp_ms() -> u128 {
 
 #[cfg(test)]
 mod tests {
-    use super::{append_journal_event, append_session_log, session_files};
+    use super::{
+        append_journal_event, append_session_log, collect_session_summaries, session_files,
+    };
     use crate::paths::build_paths;
     use serde_json::json;
     use std::fs;
@@ -132,6 +209,43 @@ mod tests {
 
         assert!(journal.contains("\"event\":\"session.created\""));
         assert!(log.contains("session created"));
+
+        let _ = fs::remove_dir_all(test_root);
+    }
+
+    #[test]
+    fn collect_session_summaries_reads_prompt_count_and_cwd() {
+        let mut paths = build_paths().expect("paths");
+        let test_root = std::env::temp_dir().join(format!(
+            "opengateway-acp-summary-test-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ));
+        paths.acp_dir = test_root.clone();
+        paths.acp_sessions_dir = test_root.join("sessions");
+        paths.acp_logs_dir = test_root.join("logs");
+        paths.acp_tmp_dir = test_root.join("tmp");
+        fs::create_dir_all(&paths.acp_sessions_dir).expect("sessions dir");
+        fs::create_dir_all(&paths.acp_logs_dir).expect("logs dir");
+
+        append_journal_event(&paths, "session-1", "session.created", json!({"cwd": "/tmp"}))
+            .expect("journal event");
+        append_journal_event(
+            &paths,
+            "session-1",
+            "prompt.completed",
+            json!({"promptBlocks": 1}),
+        )
+        .expect("prompt event");
+
+        let summaries = collect_session_summaries(&paths).expect("summaries");
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].session_id, "session-1");
+        assert_eq!(summaries[0].prompt_count, 1);
+        assert_eq!(summaries[0].cwd.as_deref(), Some("/tmp"));
+        assert_eq!(summaries[0].last_event.as_deref(), Some("prompt.completed"));
 
         let _ = fs::remove_dir_all(test_root);
     }

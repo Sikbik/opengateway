@@ -19,6 +19,7 @@ pub struct AcpArgs {
 pub enum AcpCommand {
     Serve(AcpServeArgs),
     Doctor(AcpDoctorArgs),
+    Sessions(AcpSessionsArgs),
 }
 
 #[derive(Debug, Args)]
@@ -32,10 +33,14 @@ pub struct AcpServeArgs {
 #[derive(Debug, Args, Default)]
 pub struct AcpDoctorArgs {}
 
+#[derive(Debug, Args, Default)]
+pub struct AcpSessionsArgs {}
+
 pub fn command_acp(args: AcpArgs) -> Result<()> {
     match args.command {
         AcpCommand::Serve(args) => command_serve(args),
         AcpCommand::Doctor(_) => command_doctor(),
+        AcpCommand::Sessions(_) => command_sessions(),
     }
 }
 
@@ -84,6 +89,34 @@ fn command_doctor() -> Result<()> {
     let paths = crate::paths::build_paths()?;
     paths.ensure_runtime_dirs()?;
     print!("{}", doctor::render_doctor_report(&paths));
+    Ok(())
+}
+
+fn command_sessions() -> Result<()> {
+    let paths = crate::paths::build_paths()?;
+    paths.ensure_runtime_dirs()?;
+    let sessions = super::journal::collect_session_summaries(&paths)?;
+
+    if sessions.is_empty() {
+        println!("No ACP session journals found.");
+        return Ok(());
+    }
+
+    println!("ACP sessions");
+    for session in sessions {
+        println!("{}", session.session_id);
+        println!("  prompts: {}", session.prompt_count);
+        println!(
+            "  cwd: {}",
+            session.cwd.as_deref().unwrap_or("unknown")
+        );
+        println!(
+            "  last-event: {}",
+            session.last_event.as_deref().unwrap_or("unknown")
+        );
+        println!("  journal: {}", session.journal_path.display());
+        println!("  log: {}", session.log_path.display());
+    }
     Ok(())
 }
 
