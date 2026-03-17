@@ -72,6 +72,7 @@ fn command_serve(args: AcpServeArgs) -> Result<()> {
         ServeConfig {
             agent: args.agent,
             workspace,
+            paths: Some(paths.clone()),
         },
         BufReader::new(stdin.lock()),
         &mut stdout.lock(),

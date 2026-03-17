@@ -2,12 +2,14 @@ use super::adapters::AgentKind;
 use super::errors::{
     INVALID_REQUEST, METHOD_NOT_FOUND, PARSE_ERROR, SERVER_NOT_INITIALIZED,
 };
+use super::journal::{append_journal_event, append_session_log};
 use super::protocol::{
     error_response, initialize_result, notification, success_response, RpcError, RpcRequest,
     JSONRPC_VERSION,
 };
 use super::redact::redact_text;
 use super::session::{CancelParams, NewSessionParams, PromptParams, SessionRegistry};
+use crate::paths::AppPaths;
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
 use std::io::{BufRead, Write};
@@ -19,6 +21,7 @@ pub const TRANSPORT_NAME: &str = "stdio";
 pub struct ServeConfig {
     pub agent: AgentKind,
     pub workspace: Option<PathBuf>,
+    pub paths: Option<AppPaths>,
 }
 
 #[derive(Debug)]
@@ -132,7 +135,7 @@ where
             }
         };
 
-        match handle_request(&mut state, request, output, log)? {
+        match handle_request(&config, &mut state, request, output, log)? {
             LoopControl::Continue => {}
             LoopControl::Exit => {
                 log_line(log, "acp stdio server exiting after exit notification")?;
@@ -145,6 +148,7 @@ where
 }
 
 fn handle_request<W, L>(
+    config: &ServeConfig,
     state: &mut ServerState,
     request: RpcRequest,
     output: &mut W,
@@ -276,6 +280,23 @@ where
                 log,
                 &format!("acp session created: {} ({})", session.id, session.cwd.display()),
             )?;
+            record_session_event(
+                config,
+                log,
+                &session.id,
+                "session.created",
+                json!({
+                    "agent": session.agent.as_str(),
+                    "cwd": session.cwd.display().to_string(),
+                    "mcpServers": session.mcp_server_count,
+                }),
+            )?;
+            record_session_log(
+                config,
+                log,
+                &session.id,
+                &format!("created session in {}", session.cwd.display()),
+            )?;
             write_message(
                 output,
                 &success_response(
@@ -335,12 +356,14 @@ where
             };
 
             let reply = session.build_mock_reply(&params);
+            let session_id = session.id.clone();
+            let prompt_count = session.prompt_count;
             write_message(
                 output,
                 &notification(
                     "session/update",
                     json!({
-                        "sessionId": session.id,
+                        "sessionId": session_id,
                         "update": {
                             "sessionUpdate": "agent_message_chunk",
                             "content": {
@@ -350,6 +373,23 @@ where
                         }
                     }),
                 ),
+            )?;
+            record_session_event(
+                config,
+                log,
+                &session.id,
+                "prompt.completed",
+                json!({
+                    "promptCount": prompt_count,
+                    "userMessageId": params.message_id.clone(),
+                    "promptBlocks": params.prompt.len(),
+                }),
+            )?;
+            record_session_log(
+                config,
+                log,
+                &session.id,
+                &format!("completed prompt {} with {} block(s)", prompt_count, params.prompt.len()),
             )?;
             write_message(
                 output,
@@ -388,6 +428,19 @@ where
 
             if state.sessions.contains(&params.session_id) {
                 log_line(log, &format!("acp mock cancel acknowledged for {}", params.session_id))?;
+                record_session_event(
+                    config,
+                    log,
+                    &params.session_id,
+                    "session.cancel",
+                    json!({}),
+                )?;
+                record_session_log(
+                    config,
+                    log,
+                    &params.session_id,
+                    "cancel notification received",
+                )?;
             } else {
                 log_line(
                     log,
@@ -447,6 +500,45 @@ fn log_line<L: Write>(log: &mut L, message: &str) -> Result<()> {
     Ok(())
 }
 
+fn record_session_event<L: Write>(
+    config: &ServeConfig,
+    log: &mut L,
+    session_id: &str,
+    event: &str,
+    data: Value,
+) -> Result<()> {
+    let Some(paths) = &config.paths else {
+        return Ok(());
+    };
+
+    if let Err(error) = append_journal_event(paths, session_id, event, data) {
+        log_line(
+            log,
+            &format!("failed to append ACP journal for {session_id}: {error}"),
+        )?;
+    }
+    Ok(())
+}
+
+fn record_session_log<L: Write>(
+    config: &ServeConfig,
+    log: &mut L,
+    session_id: &str,
+    message: &str,
+) -> Result<()> {
+    let Some(paths) = &config.paths else {
+        return Ok(());
+    };
+
+    if let Err(error) = append_session_log(paths, session_id, message) {
+        log_line(
+            log,
+            &format!("failed to append ACP session log for {session_id}: {error}"),
+        )?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{serve_stdio, ServeConfig};
@@ -462,6 +554,7 @@ mod tests {
             ServeConfig {
                 agent: AgentKind::Codex,
                 workspace: None,
+                paths: None,
             },
             Cursor::new(input.as_bytes()),
             &mut output,
