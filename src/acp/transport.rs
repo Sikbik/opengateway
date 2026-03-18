@@ -755,6 +755,17 @@ where
                 return Ok(LoopControl::Continue);
             }
             Ok(PromptWorkerEvent::Failed(error)) => {
+                record_session_event(
+                    config,
+                    log,
+                    &active.session_id,
+                    "session.runtime_failed",
+                    json!({
+                        "reason": "worker_failed",
+                        "detail": error,
+                    }),
+                )?;
+                record_session_log(config, log, &active.session_id, "ACP prompt worker failed")?;
                 write_message(
                     output,
                     &error_response(
@@ -772,6 +783,21 @@ where
             }
             Err(mpsc::TryRecvError::Empty) => return Ok(LoopControl::Continue),
             Err(mpsc::TryRecvError::Disconnected) => {
+                record_session_event(
+                    config,
+                    log,
+                    &active.session_id,
+                    "session.runtime_failed",
+                    json!({
+                        "reason": "worker_disconnected",
+                    }),
+                )?;
+                record_session_log(
+                    config,
+                    log,
+                    &active.session_id,
+                    "ACP prompt worker disconnected unexpectedly",
+                )?;
                 write_message(
                     output,
                     &error_response(

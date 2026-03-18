@@ -142,6 +142,11 @@ fn command_inspect(args: AcpInspectArgs) -> Result<()> {
 
     println!("ACP session inspect");
     println!("session: {}", detail.summary.session_id);
+    println!("metrics:");
+    println!("  sessions-created: {}", detail.metrics.sessions_created);
+    println!("  prompts-completed: {}", detail.metrics.prompts_completed);
+    println!("  prompts-cancelled: {}", detail.metrics.prompts_cancelled);
+    println!("  runtime-failures: {}", detail.metrics.runtime_failures);
     println!("prompts: {}", detail.summary.prompt_count);
     println!(
         "cwd: {}",

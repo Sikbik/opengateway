@@ -5,7 +5,7 @@ use std::cmp::Reverse;
 use std::fs;
 use std::fs::OpenOptions;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -32,9 +32,18 @@ pub struct SessionEventRecord {
     pub data: Value,
 }
 
+#[derive(Debug, Clone, Default, Eq, PartialEq)]
+pub struct AcpMetricsSummary {
+    pub sessions_created: usize,
+    pub prompts_completed: usize,
+    pub prompts_cancelled: usize,
+    pub runtime_failures: usize,
+}
+
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct SessionDetail {
     pub summary: SessionSummary,
+    pub metrics: AcpMetricsSummary,
     pub recent_events: Vec<SessionEventRecord>,
     pub recent_logs: Vec<String>,
 }
@@ -135,6 +144,24 @@ pub fn highest_session_sequence(paths: &AppPaths) -> Result<u64> {
     Ok(max_sequence)
 }
 
+pub fn collect_metrics_summary(paths: &AppPaths) -> Result<AcpMetricsSummary> {
+    let mut metrics = AcpMetricsSummary::default();
+    for entry in fs::read_dir(&paths.acp_sessions_dir)
+        .with_context(|| format!("failed to read {}", paths.acp_sessions_dir.display()))?
+    {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
+            continue;
+        }
+
+        for record in read_session_events(&path)? {
+            metrics.record(&record);
+        }
+    }
+    Ok(metrics)
+}
+
 pub fn inspect_session(
     paths: &AppPaths,
     session_id: &str,
@@ -147,11 +174,16 @@ pub fn inspect_session(
         return Ok(None);
     };
 
-    let events = read_recent_session_events(&summary.journal_path, limit)?;
+    let events = read_session_events(&summary.journal_path)?;
+    let mut metrics = AcpMetricsSummary::default();
+    for event in &events {
+        metrics.record(event);
+    }
     let logs = read_recent_log_lines(&summary.log_path, limit)?;
     Ok(Some(SessionDetail {
         summary,
-        recent_events: events,
+        metrics,
+        recent_events: tail_event_records(events, limit),
         recent_logs: logs,
     }))
 }
@@ -221,27 +253,33 @@ fn parse_session_sequence(session_id: &str) -> Option<u64> {
     digits.parse().ok()
 }
 
-fn read_recent_session_events(path: &PathBuf, limit: usize) -> Result<Vec<SessionEventRecord>> {
-    let contents =
-        fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
-    let lines = tail_lines(&contents, limit);
-    let mut events = Vec::with_capacity(lines.len());
-    for line in lines {
-        let value: Value = serde_json::from_str(line)
-            .with_context(|| format!("invalid ACP journal line in {}", path.display()))?;
-        events.push(SessionEventRecord {
-            timestamp_ms: value.get("ts").and_then(Value::as_u64).map(u128::from),
-            event: value
-                .get("event")
-                .and_then(Value::as_str)
-                .map(str::to_string),
-            data: value.get("data").cloned().unwrap_or(Value::Null),
-        });
+impl AcpMetricsSummary {
+    fn record(&mut self, record: &SessionEventRecord) {
+        match record.event.as_deref() {
+            Some("session.created") => self.sessions_created += 1,
+            Some("prompt.completed") => {
+                self.prompts_completed += 1;
+                if record.data.get("stopReason").and_then(Value::as_str) == Some("cancelled") {
+                    self.prompts_cancelled += 1;
+                }
+            }
+            Some("session.runtime_failed") => self.runtime_failures += 1,
+            _ => {}
+        }
     }
-    Ok(events)
 }
 
-fn read_recent_log_lines(path: &PathBuf, limit: usize) -> Result<Vec<String>> {
+fn read_session_events(path: &Path) -> Result<Vec<SessionEventRecord>> {
+    let contents =
+        fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
+    contents
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| parse_event_record(path, line))
+        .collect()
+}
+
+fn read_recent_log_lines(path: &Path, limit: usize) -> Result<Vec<String>> {
     match fs::read_to_string(path) {
         Ok(contents) => Ok(tail_lines(&contents, limit)
             .into_iter()
@@ -264,6 +302,27 @@ fn tail_lines(contents: &str, limit: usize) -> Vec<&str> {
     lines.into_iter().skip(start).collect()
 }
 
+fn tail_event_records(events: Vec<SessionEventRecord>, limit: usize) -> Vec<SessionEventRecord> {
+    if limit == 0 {
+        return Vec::new();
+    }
+    let start = events.len().saturating_sub(limit);
+    events.into_iter().skip(start).collect()
+}
+
+fn parse_event_record(path: &Path, line: &str) -> Result<SessionEventRecord> {
+    let value: Value = serde_json::from_str(line)
+        .with_context(|| format!("invalid ACP journal line in {}", path.display()))?;
+    Ok(SessionEventRecord {
+        timestamp_ms: value.get("ts").and_then(Value::as_u64).map(u128::from),
+        event: value
+            .get("event")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        data: value.get("data").cloned().unwrap_or(Value::Null),
+    })
+}
+
 fn unix_timestamp_ms() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -274,7 +333,7 @@ fn unix_timestamp_ms() -> u128 {
 #[cfg(test)]
 mod tests {
     use super::{
-        append_journal_event, append_session_log, collect_session_summaries,
+        append_journal_event, append_session_log, collect_metrics_summary, collect_session_summaries,
         highest_session_sequence, inspect_session, parse_session_sequence, session_files, tail_lines,
     };
     use crate::paths::build_paths;
@@ -386,6 +445,8 @@ mod tests {
             .expect("detail")
             .expect("session present");
         assert_eq!(detail.summary.session_id, "session-1");
+        assert_eq!(detail.metrics.sessions_created, 1);
+        assert_eq!(detail.metrics.prompts_completed, 1);
         assert_eq!(detail.recent_events.len(), 1);
         assert_eq!(
             detail.recent_events[0].event.as_deref(),
@@ -432,6 +493,63 @@ mod tests {
 
         let sequence = highest_session_sequence(&paths).expect("sequence");
         assert_eq!(sequence, 9);
+
+        let _ = fs::remove_dir_all(test_root);
+    }
+
+    #[test]
+    fn collect_metrics_summary_counts_cancelled_and_failed_prompts() {
+        let mut paths = build_paths().expect("paths");
+        let test_root = std::env::temp_dir().join(format!(
+            "opengateway-acp-metrics-test-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ));
+        paths.acp_dir = test_root.clone();
+        paths.acp_sessions_dir = test_root.join("sessions");
+        paths.acp_logs_dir = test_root.join("logs");
+        paths.acp_tmp_dir = test_root.join("tmp");
+        fs::create_dir_all(&paths.acp_sessions_dir).expect("sessions dir");
+        fs::create_dir_all(&paths.acp_logs_dir).expect("logs dir");
+
+        append_journal_event(&paths, "session-1", "session.created", json!({"cwd": "/tmp"}))
+            .expect("journal event");
+        append_journal_event(
+            &paths,
+            "session-1",
+            "prompt.completed",
+            json!({"stopReason": "end_turn"}),
+        )
+        .expect("completed prompt");
+        append_journal_event(
+            &paths,
+            "session-2",
+            "session.created",
+            json!({"cwd": "/tmp"}),
+        )
+        .expect("journal event");
+        append_journal_event(
+            &paths,
+            "session-2",
+            "prompt.completed",
+            json!({"stopReason": "cancelled"}),
+        )
+        .expect("cancelled prompt");
+        append_journal_event(
+            &paths,
+            "session-2",
+            "session.runtime_failed",
+            json!({"reason": "worker_failed"}),
+        )
+        .expect("runtime failure");
+
+        let metrics = collect_metrics_summary(&paths).expect("metrics");
+        assert_eq!(metrics.sessions_created, 2);
+        assert_eq!(metrics.prompts_completed, 2);
+        assert_eq!(metrics.prompts_cancelled, 1);
+        assert_eq!(metrics.runtime_failures, 1);
 
         let _ = fs::remove_dir_all(test_root);
     }

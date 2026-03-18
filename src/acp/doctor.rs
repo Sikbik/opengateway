@@ -1,7 +1,7 @@
 use super::adapters::{codex, supported_agents};
 use super::capabilities::planned_capabilities;
 use super::errors::error_categories;
-use super::journal::{collect_session_summaries, scaffold_session_files};
+use super::journal::{collect_metrics_summary, collect_session_summaries, scaffold_session_files};
 use super::protocol::JSONRPC_VERSION;
 use super::redact::redact_text;
 use super::session::session_states;
@@ -23,6 +23,7 @@ pub fn render_doctor_report(paths: &AppPaths) -> String {
     let redaction_ready =
         redact_text("Authorization: Bearer acp-scaffold-secret") != "Authorization: Bearer acp-scaffold-secret";
     let session_summaries = collect_session_summaries(paths).unwrap_or_default();
+    let metrics = collect_metrics_summary(paths).unwrap_or_default();
     let latest_session = session_summaries.first();
     let codex_guidance = render_guidance_lines("codex", &codex::doctor_guidance(&codex_runtime));
 
@@ -64,6 +65,11 @@ paths:
   scaffold-journal: {journal}
   scaffold-log: {session_log}
 recorded-sessions: {session_count}
+metrics-summary:
+  sessions-created: {sessions_created}
+  prompts-completed: {prompts_completed}
+  prompts-cancelled: {prompts_cancelled}
+  runtime-failures: {runtime_failures}
 latest-session: {latest_session}
 latest-event: {latest_event}
 session-states: {states}
@@ -101,6 +107,10 @@ redaction-ready: {redaction_ready}
         journal = sample_files.journal_path.display(),
         session_log = sample_files.log_path.display(),
         session_count = session_summaries.len(),
+        sessions_created = metrics.sessions_created,
+        prompts_completed = metrics.prompts_completed,
+        prompts_cancelled = metrics.prompts_cancelled,
+        runtime_failures = metrics.runtime_failures,
         latest_session = latest_session
             .map(|session| session.session_id.as_str())
             .unwrap_or("none"),
@@ -149,6 +159,7 @@ mod tests {
         assert!(report.contains("codex-ready:"));
         assert!(report.contains("guidance:"));
         assert!(report.contains("codex-next-step:"));
+        assert!(report.contains("metrics-summary:"));
         assert!(report.contains("loadSession: no"));
         assert!(report.contains("recorded-sessions:"));
     }
