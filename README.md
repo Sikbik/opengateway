@@ -158,6 +158,15 @@ Use the tracked setup examples here:
 - `examples/acp/jetbrains-acp.json`
 - `examples/acp/TROUBLESHOOTING.md`
 
+If you publish ACP branch artifacts publicly, prefer an ACP prerelease tag:
+
+```bash
+git tag acp-v0.1.0
+git push origin acp-v0.1.0
+```
+
+That keeps the GitHub release visibly marked as experimental instead of looking like a normal stable desktop drop.
+
 Important ACP rule:
 - keep the editor, `opengateway`, and the Codex runtime in the same environment
 
@@ -182,6 +191,11 @@ To publish those builds to GitHub Releases:
   - Windows installer
   - Linux `.deb`
   - macOS `.dmg`
+
+ACP branch release posture:
+- normal tags like `v0.2.0` stay normal desktop releases
+- ACP experimental tags like `acp-v0.2.0` publish a prerelease with an explicit ACP warning block
+- use ACP prerelease tags only when the branch includes the experimental ACP lane and setup examples
 
 Workflow file:
 - `.github/workflows/desktop-artifacts.yml`

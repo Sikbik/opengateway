@@ -17,6 +17,7 @@ on:
       - main
     tags:
       - "v*"
+      - "acp-v*"
     paths:
       - ".github/workflows/desktop-artifacts.yml"
       - "Cargo.toml"
@@ -115,7 +116,7 @@ jobs:
           if-no-files-found: error
 
   release:
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    if: github.event_name == 'push' && (startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/acp-v'))
     needs: build
     runs-on: ubuntu-latest
     permissions:
@@ -137,13 +138,52 @@ jobs:
           set -euo pipefail
 
           tag="${GITHUB_REF_NAME}"
-          title="Factory Control ${tag}"
+          if [[ "$tag" == acp-v* ]]; then
+            title="Factory Control ACP Experimental ${tag#acp-}"
+            prerelease_flag="--prerelease"
+            notes_file="$(mktemp)"
+            cat >"$notes_file" <<'EOF'
+Experimental ACP release
+
+This release includes the ACP lane as an experimental surface.
+
+Current ACP scope:
+- real adapter: Codex
+- placeholder only: Claude
+- transport: stdio
+
+Important release posture:
+- treat ACP as experimental
+- keep the current HTTP / Factory gateway lane as the primary stable surface
+- run `opengateway acp doctor` before configuring an editor
+- use the tracked ACP setup examples in `examples/acp/`
+EOF
+          else
+            title="Factory Control ${tag}"
+            prerelease_flag=""
+            notes_file=""
+          fi
 
           if gh release view "$tag" --repo "$GH_REPO" >/dev/null 2>&1; then
             gh release upload "$tag" release-assets/* --clobber --repo "$GH_REPO"
+            if [[ -n "$notes_file" ]]; then
+              gh release edit "$tag" \
+                --repo "$GH_REPO" \
+                --title "$title" \
+                --notes-file "$notes_file" \
+                $prerelease_flag
+            fi
           else
-            gh release create "$tag" release-assets/* \
-              --repo "$GH_REPO" \
-              --title "$title" \
-              --generate-notes
+            if [[ -n "$notes_file" ]]; then
+              gh release create "$tag" release-assets/* \
+                --repo "$GH_REPO" \
+                --title "$title" \
+                --notes-file "$notes_file" \
+                $prerelease_flag
+            else
+              gh release create "$tag" release-assets/* \
+                --repo "$GH_REPO" \
+                --title "$title" \
+                --generate-notes
+            fi
           fi
