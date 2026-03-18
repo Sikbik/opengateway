@@ -110,29 +110,9 @@ Explicit modes:
 ```bash
 opengateway control web
 opengateway control desktop
-opengateway control check
-opengateway control build
 ```
 
-In WSL, only `web` is supported. Native `desktop`, `check`, and `build` modes require a real desktop Linux/macOS host or CI.
-
-Direct repo launcher still works:
-
-```bash
-./bin/factory-control
-```
-
-Windows repo launcher:
-
-```powershell
-.\bin\factory-control.ps1
-```
-
-If you run `opengateway control` outside the repo, pass the checkout explicitly:
-
-```bash
-opengateway control --workspace /path/to/opengateway
-```
+In WSL, only `web` is supported. Native `desktop` mode requires a real desktop Linux/macOS host.
 
 ## Experimental ACP
 
@@ -152,10 +132,6 @@ opengateway acp sessions
 opengateway acp inspect <session-id>
 ```
 
-Use the tracked setup examples here:
-- `examples/acp/README.md`
-- `examples/acp/zed-settings.jsonc`
-
 Important ACP rule:
 - keep the editor, `opengateway`, and the Codex runtime in the same environment
 
@@ -163,26 +139,10 @@ This ACP lane is experimental and separate from the current HTTP / Factory gatew
 
 ## Desktop builds
 
-If you just want desktop artifacts, use GitHub Actions instead of setting up a local packaging toolchain.
-
-Workflow:
-- open `Desktop Artifacts` in GitHub Actions
-- run it manually, or let it run from a PR / push to `main`
-- download the artifact you want:
-  - Windows: NSIS installer
-  - Linux: Debian package (`.deb`) for Ubuntu and other Debian-based distros
-  - macOS: DMG
-
-To publish those builds to GitHub Releases:
-- push a version tag like `v0.1.0`
-- the same `Desktop Artifacts` workflow will build all three targets
-- after the build job finishes, the workflow will create or update the GitHub Release for that tag and attach:
-  - Windows installer
-  - Linux `.deb`
-  - macOS `.dmg`
-
-Workflow file:
-- `.github/workflows/desktop-artifacts.yml`
+Prebuilt desktop packages are published through GitHub Releases:
+- Windows: NSIS installer
+- Linux: Debian package (`.deb`) for Ubuntu and other Debian-based distros
+- macOS: DMG
 
 The packaged Windows build bundles a native `opengateway.exe` backend and uses the WebView2 bootstrapper installer. If a default WSL environment already has both `~/.local/bin/opengateway` and `~/.factory`, the GUI prefers that WSL backend automatically; otherwise it falls back to the bundled Windows backend. That keeps the installer much smaller, but Windows may need internet access if WebView2 is not already present.
 
