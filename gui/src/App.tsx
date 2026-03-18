@@ -10,13 +10,14 @@ import {
 } from "react";
 import { call, runtimeMode } from "./runtime";
 import type {
+  AcpGuiSnapshot,
   AppSnapshot,
   CommandResult,
   DroidRecord,
   HealthState,
 } from "./types";
 
-type TabKey = "dashboard" | "droids" | "factory" | "logs";
+type TabKey = "dashboard" | "droids" | "factory" | "acp" | "logs";
 type DroidFilterKey = "all" | "custom" | "inherit" | "issues";
 type DroidSortMode = "name" | "scope" | "custom" | "flagged";
 type DroidPresetKey = "none" | "reviewers" | "workers" | "inherited";
@@ -34,7 +35,8 @@ const TABS: Array<{ key: TabKey; label: string; index: string }> = [
   { key: "dashboard", label: "Overview", index: "01" },
   { key: "droids", label: "Droids", index: "02" },
   { key: "factory", label: "Factory", index: "03" },
-  { key: "logs", label: "Logs", index: "04" },
+  { key: "acp", label: "ACP", index: "04" },
+  { key: "logs", label: "Logs", index: "05" },
 ];
 
 const POLL_INTERVAL_MS = 5000;
@@ -122,6 +124,38 @@ function formatLogTimestamp(timestamp: number | null) {
     minute: "2-digit",
     second: "2-digit",
   });
+}
+
+function formatSessionTimestamp(timestamp: number | null | undefined) {
+  if (!timestamp) {
+    return "Never";
+  }
+  return new Date(timestamp).toLocaleString([], {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+
+function formatSessionEvent(value: string | null | undefined) {
+  if (!value) {
+    return "No activity";
+  }
+  return value.replace(/[._-]+/g, " ");
+}
+
+function getAgentTone(agent: {
+  ready: boolean;
+  issue: string | null;
+}): HealthState {
+  if (agent.ready) {
+    return "online";
+  }
+  if (agent.issue) {
+    return "offline";
+  }
+  return "degraded";
 }
 
 function parseLogLine(line: string) {
@@ -345,6 +379,7 @@ function ThemedSelect({
 
 function App() {
   const [snapshot, setSnapshot] = useState<AppSnapshot | null>(null);
+  const [acpSnapshot, setAcpSnapshot] = useState<AcpGuiSnapshot | null>(null);
   const [logs, setLogs] = useState<string[]>([]);
   const [doctorOutput, setDoctorOutput] = useState("");
   const [activeTab, setActiveTab] = useState<TabKey>("dashboard");
@@ -365,6 +400,7 @@ function App() {
     machine: false,
   });
   const [busyAction, setBusyAction] = useState<string | null>(null);
+  const [acpError, setAcpError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const mounted = useRef(true);
   const mode = runtimeMode();
@@ -410,6 +446,24 @@ function App() {
     }
   }
 
+  async function refreshAcp() {
+    try {
+      const nextSnapshot = await call<AcpGuiSnapshot>("load_acp_snapshot");
+      if (!mounted.current) {
+        return;
+      }
+      startTransition(() => {
+        setAcpSnapshot(nextSnapshot);
+      });
+      setAcpError(null);
+    } catch (cause) {
+      if (!mounted.current) {
+        return;
+      }
+      setAcpError(String(cause));
+    }
+  }
+
   useEffect(() => {
     mounted.current = true;
     void refreshAll();
@@ -422,6 +476,21 @@ function App() {
       window.clearInterval(timer);
     };
   }, []);
+
+  useEffect(() => {
+    if (activeTab !== "acp") {
+      return;
+    }
+
+    void refreshAcp();
+    const timer = window.setInterval(() => {
+      void refreshAcp();
+    }, POLL_INTERVAL_MS);
+
+    return () => {
+      window.clearInterval(timer);
+    };
+  }, [activeTab]);
 
   async function runAction(
     action: string,
@@ -702,6 +771,59 @@ function App() {
         ? "Cooling Down"
         : "Offline";
   const logEntries = logs.slice().reverse().map(parseLogLine);
+  const acpAgents = acpSnapshot?.agents ?? [];
+  const acpSessions = acpSnapshot?.sessions ?? [];
+  const readyAgentCount = acpAgents.filter((agent) => agent.ready).length;
+  const acpHealthTone: HealthState = acpSnapshot
+    ? readyAgentCount > 0
+      ? "online"
+      : "offline"
+    : "degraded";
+  const acpHealthLabel = acpSnapshot
+    ? readyAgentCount > 0
+      ? "Ready"
+      : "Not ready"
+    : "Loading";
+  const acpMetrics = acpSnapshot
+    ? [
+        {
+          label: "Adapters ready",
+          value: `${readyAgentCount}/${acpAgents.length}`,
+        },
+        {
+          label: "Recorded sessions",
+          value: String(acpSessions.length),
+        },
+        {
+          label: "Prompt completions",
+          value: String(acpSnapshot.metrics.promptsCompleted),
+        },
+        {
+          label: "Runtime failures",
+          value: String(acpSnapshot.metrics.runtimeFailures),
+        },
+      ]
+    : [];
+  const acpFacts = acpSnapshot
+    ? [
+        {
+          label: "Command",
+          value: acpSnapshot.command,
+        },
+        {
+          label: "Transport",
+          value: acpSnapshot.transport,
+        },
+        {
+          label: "Process model",
+          value: acpSnapshot.processModel,
+        },
+        {
+          label: "Profile",
+          value: acpSnapshot.experimental ? "Experimental" : "Stable",
+        },
+      ]
+    : [];
 
   return (
     <div className="shell">
@@ -1366,6 +1488,155 @@ function App() {
                     <strong>{card.value}</strong>
                   </div>
                 ))}
+              </div>
+            </article>
+          </div>
+        </section>
+
+        <section className={activeTab === "acp" ? "view view--active" : "view"}>
+          <div className="factory-grid">
+            <article className="panel factory-card acp-stage">
+              <div className="panel-heading panel-heading--tight">
+                <div>
+                  <p className="eyebrow">ACP Control Plane</p>
+                  <h2>Adapter and runtime status</h2>
+                </div>
+                <span className={`health-pill health-pill--${acpHealthTone}`}>
+                  {acpHealthLabel}
+                </span>
+              </div>
+
+              {acpError ? (
+                <div className="acp-inline-error">{acpError}</div>
+              ) : null}
+
+              {acpSnapshot ? (
+                <>
+                  <div className="acp-stage__strip">
+                    {acpMetrics.map((metric) => (
+                      <div key={metric.label} className="gateway-stage__datum">
+                        <span>{metric.label}</span>
+                        <strong>{metric.value}</strong>
+                      </div>
+                    ))}
+                  </div>
+
+                  <div className="acp-stage__fact-grid">
+                    {acpFacts.map((fact) => (
+                      <div key={fact.label} className="gateway-stage__datum">
+                        <span>{fact.label}</span>
+                        <strong>{fact.value}</strong>
+                      </div>
+                    ))}
+                  </div>
+                </>
+              ) : (
+                <div className="empty-state">
+                  Loading ACP runtime status and recorded session summary.
+                </div>
+              )}
+            </article>
+
+            <article className="panel factory-card acp-adapters">
+              <div className="panel-heading panel-heading--tight">
+                <div>
+                  <p className="eyebrow">Adapter Deck</p>
+                  <h2>Ready runtimes and launch guidance</h2>
+                </div>
+              </div>
+
+              <div className="acp-adapters__grid">
+                {acpAgents.length > 0 ? (
+                  acpAgents.map((agent) => (
+                    <article key={agent.kind} className="acp-adapter-card">
+                      <div className="acp-adapter-card__head">
+                        <div>
+                          <p className="eyebrow">{agent.kind}</p>
+                          <h3>{agent.runtimeName}</h3>
+                        </div>
+                        <span
+                          className={`health-pill health-pill--${getAgentTone(agent)}`}
+                        >
+                          {agent.ready ? "Ready" : "Unavailable"}
+                        </span>
+                      </div>
+                      <p className="acp-adapter-card__status">
+                        {formatSessionEvent(agent.status)}
+                      </p>
+                      {agent.issue ? (
+                        <p className="acp-adapter-card__issue">{agent.issue}</p>
+                      ) : null}
+                      {agent.guidance.length > 0 ? (
+                        <ul className="acp-guidance-list">
+                          {agent.guidance.map((line) => (
+                            <li key={line}>{line}</li>
+                          ))}
+                        </ul>
+                      ) : null}
+                    </article>
+                  ))
+                ) : (
+                  <div className="empty-state">
+                    No ACP adapters have reported readiness yet.
+                  </div>
+                )}
+              </div>
+            </article>
+
+            <article className="panel factory-card factory-card--wide acp-sessions">
+              <div className="panel-heading panel-heading--tight">
+                <div>
+                  <p className="eyebrow">Session Ledger</p>
+                  <h2>Recorded ACP sessions</h2>
+                </div>
+                <span className="datum">
+                  {acpSnapshot?.metrics.sessionsCreated ?? 0} created
+                </span>
+              </div>
+
+              <div className="acp-session-list">
+                {acpSessions.length > 0 ? (
+                  acpSessions.map((session) => (
+                    <article
+                      key={session.sessionId}
+                      className="acp-session-row"
+                    >
+                      <div className="acp-session-row__main">
+                        <div className="acp-session-row__topline">
+                          <strong>{session.sessionId}</strong>
+                          <span className="chip chip--custom">
+                            {session.promptCount} prompts
+                          </span>
+                          <span className="chip chip--inherit">
+                            {formatSessionEvent(session.lastEvent)}
+                          </span>
+                        </div>
+                        <p className="droid-row__path">
+                          {session.cwd ?? "No working directory recorded"}
+                        </p>
+                      </div>
+
+                      <dl className="acp-session-row__facts">
+                        <div>
+                          <dt>Last seen</dt>
+                          <dd>{formatSessionTimestamp(session.lastTimestampMs)}</dd>
+                        </div>
+                        <div>
+                          <dt>Journal</dt>
+                          <dd>{compactValue(session.journalPath, 18)}</dd>
+                        </div>
+                        <div>
+                          <dt>Log</dt>
+                          <dd>{compactValue(session.logPath, 18)}</dd>
+                        </div>
+                      </dl>
+                    </article>
+                  ))
+                ) : (
+                  <div className="empty-state">
+                    No ACP sessions have been recorded yet.
+                  </div>
+                )}
               </div>
             </article>
           </div>
