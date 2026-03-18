@@ -28,7 +28,7 @@ pub fn supported_agents() -> &'static [AgentDescriptor] {
         AgentDescriptor {
             kind: AgentKind::Claude,
             runtime_name: claude::RUNTIME_NAME,
-            status: "placeholder",
+            status: "mvp-session-runtime",
             note: claude::SCAFFOLD_NOTE,
         },
     ]

@@ -1,4 +1,4 @@
-use super::adapters::{codex, AgentKind};
+use super::adapters::{claude, codex, AgentKind};
 use super::journal::highest_session_sequence;
 use super::session::{
     CancelParams, ChildRuntimeEnvelope, ChildRuntimeRequest, ChildRuntimeResponse,
@@ -281,7 +281,32 @@ impl ProcessSession {
                         }
                     }
                 }
-                AgentKind::Claude => bail!("ACP Claude runtime is not implemented yet"),
+                AgentKind::Claude => {
+                    let readiness = claude::inspect_runtime();
+                    if !readiness.ready {
+                        let issue = readiness
+                            .issue
+                            .as_deref()
+                            .unwrap_or("unknown Claude runtime issue");
+                        bail!(
+                            "ACP Claude runtime is not ready: {issue}. {}",
+                            claude::spawn_guidance(&readiness)
+                        );
+                    }
+                    command
+                        .arg("acp-claude-runtime")
+                        .arg("--session-id")
+                        .arg(session_id)
+                        .arg("--cwd")
+                        .arg(&params.cwd)
+                        .arg("--mcp-server-count")
+                        .arg(params.mcp_servers.len().to_string());
+                    if let Some(model) = params.model.as_deref() {
+                        if !model.trim().is_empty() {
+                            command.arg("--model").arg(model);
+                        }
+                    }
+                }
             },
             RuntimeMode::ProcessMock => {
                 command
@@ -314,7 +339,17 @@ impl ProcessSession {
                     codex::spawn_guidance(&readiness)
                 )
             }
-            AgentKind::Claude => "failed to spawn ACP session runtime".to_string(),
+            AgentKind::Claude => {
+                let readiness = claude::inspect_runtime();
+                let issue = readiness
+                    .issue
+                    .as_deref()
+                    .unwrap_or("failed to start the Claude child runtime");
+                format!(
+                    "failed to spawn ACP session runtime: {issue}. {}",
+                    claude::spawn_guidance(&readiness)
+                )
+            }
         })?;
         let stdin = child
             .stdin
@@ -688,22 +723,6 @@ mod tests {
             )
             .expect_err("cap should reject");
         assert!(error.to_string().contains("session limit reached"));
-    }
-
-    #[test]
-    fn real_subprocess_mode_rejects_claude_until_adapter_exists() {
-        let mut supervisor = SessionSupervisor::new(RuntimeMode::Subprocess);
-        let error = supervisor
-            .create(
-                AgentKind::Claude,
-                NewSessionParams {
-                    cwd: PathBuf::from("/tmp"),
-                    mcp_servers: vec![],
-                    model: None,
-                },
-        )
-        .expect_err("claude should not create yet");
-        assert!(error.to_string().contains("Claude runtime is not implemented"));
     }
 
     #[test]

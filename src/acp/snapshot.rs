@@ -1,4 +1,4 @@
-use super::adapters::{codex, supported_agents, AgentKind};
+use super::adapters::{claude, codex, supported_agents, AgentKind};
 use super::capabilities::{planned_capabilities, PlannedCapabilities};
 use super::journal::{
     collect_metrics_summary, collect_recent_session_issues, collect_session_summaries,
@@ -59,6 +59,28 @@ pub struct AcpAgentSnapshot {
     pub supports_skip_git_repo_check: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub supports_cwd_flag: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub supports_print: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub supports_stream_json: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub supports_partial_messages: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub supports_permission_mode: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub supports_model_flag: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub supports_no_session_persistence: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub supports_verbose: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auth_ready: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auth_method: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub api_provider: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subscription_type: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -83,6 +105,7 @@ pub fn build_snapshot(paths: &AppPaths) -> Result<AcpSnapshot> {
     let sessions = collect_session_summaries(paths)?;
     let metrics = collect_metrics_summary(paths)?;
     let codex_runtime = codex::inspect_runtime();
+    let claude_runtime = claude::inspect_runtime();
     let agents = supported_agents()
         .iter()
         .map(|agent| match agent.kind {
@@ -103,24 +126,46 @@ pub fn build_snapshot(paths: &AppPaths) -> Result<AcpSnapshot> {
                 supports_ephemeral: Some(codex_runtime.supports_ephemeral),
                 supports_skip_git_repo_check: Some(codex_runtime.supports_skip_git_repo_check),
                 supports_cwd_flag: Some(codex_runtime.supports_cwd_flag),
+                supports_print: None,
+                supports_stream_json: None,
+                supports_partial_messages: None,
+                supports_permission_mode: None,
+                supports_model_flag: None,
+                supports_no_session_persistence: None,
+                supports_verbose: None,
+                auth_ready: None,
+                auth_method: None,
+                api_provider: None,
+                subscription_type: None,
             },
             AgentKind::Claude => AcpAgentSnapshot {
                 kind: agent.kind.as_str(),
                 runtime_name: agent.runtime_name,
                 status: agent.status,
                 note: agent.note,
-                ready: false,
-                issue: Some("adapter not implemented".to_string()),
-                guidance: vec![
-                    "Wait for the Claude adapter before configuring a Claude ACP harness."
-                        .to_string(),
-                ],
-                executable_path: None,
-                version: None,
+                ready: claude_runtime.ready,
+                issue: claude_runtime.issue.clone(),
+                guidance: claude::doctor_guidance(&claude_runtime),
+                executable_path: claude_runtime
+                    .executable_path
+                    .as_ref()
+                    .map(|path| path.display().to_string()),
+                version: claude_runtime.version.clone(),
                 supports_json: None,
                 supports_ephemeral: None,
                 supports_skip_git_repo_check: None,
                 supports_cwd_flag: None,
+                supports_print: Some(claude_runtime.supports_print),
+                supports_stream_json: Some(claude_runtime.supports_stream_json),
+                supports_partial_messages: Some(claude_runtime.supports_partial_messages),
+                supports_permission_mode: Some(claude_runtime.supports_permission_mode),
+                supports_model_flag: Some(claude_runtime.supports_model_flag),
+                supports_no_session_persistence: Some(claude_runtime.supports_no_session_persistence),
+                supports_verbose: Some(claude_runtime.supports_verbose),
+                auth_ready: Some(claude_runtime.auth_ready),
+                auth_method: claude_runtime.auth_method.clone(),
+                api_provider: claude_runtime.api_provider.clone(),
+                subscription_type: claude_runtime.subscription_type.clone(),
             },
         })
         .collect();
@@ -134,6 +179,19 @@ pub fn build_snapshot(paths: &AppPaths) -> Result<AcpSnapshot> {
             hint: codex::doctor_guidance(&codex_runtime).into_iter().next(),
             session_id: None,
             agent_kind: Some("codex".to_string()),
+            cwd: None,
+            timestamp_ms: None,
+        });
+    }
+    if let Some(issue) = claude_runtime.issue.clone() {
+        issues.push(AcpIssueSnapshot {
+            scope: "adapter",
+            severity: "critical",
+            label: "claude".to_string(),
+            message: issue,
+            hint: claude::doctor_guidance(&claude_runtime).into_iter().next(),
+            session_id: None,
+            agent_kind: Some("claude".to_string()),
             cwd: None,
             timestamp_ms: None,
         });

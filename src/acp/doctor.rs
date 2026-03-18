@@ -1,4 +1,4 @@
-use super::adapters::{codex, supported_agents};
+use super::adapters::{claude, codex, supported_agents};
 use super::capabilities::planned_capabilities;
 use super::errors::error_categories;
 use super::journal::{collect_metrics_summary, collect_session_summaries, scaffold_session_files};
@@ -14,6 +14,7 @@ pub fn render_doctor_report(paths: &AppPaths) -> String {
     let capabilities = planned_capabilities();
     let sample_files = scaffold_session_files(paths);
     let codex_runtime = codex::inspect_runtime();
+    let claude_runtime = claude::inspect_runtime();
     let agents = supported_agents()
         .iter()
         .map(|agent| format!("{} ({})", agent.runtime_name, agent.status))
@@ -26,6 +27,8 @@ pub fn render_doctor_report(paths: &AppPaths) -> String {
     let metrics = collect_metrics_summary(paths).unwrap_or_default();
     let latest_session = session_summaries.first();
     let codex_guidance = render_guidance_lines("codex", &codex::doctor_guidance(&codex_runtime));
+    let claude_guidance =
+        render_guidance_lines("claude", &claude::doctor_guidance(&claude_runtime));
 
     format!(
         "\
@@ -46,11 +49,23 @@ runtime-readiness:
   codex-exec-skip-git-repo-check: {codex_exec_skip_git_repo_check}
   codex-exec-cwd-flag: {codex_exec_cwd_flag}
   codex-issue: {codex_issue}
-  claude-ready: no
-  claude-issue: adapter not implemented
+  claude-ready: {claude_ready}
+  claude-path: {claude_path}
+  claude-version: {claude_version}
+  claude-print: {claude_print}
+  claude-stream-json: {claude_stream_json}
+  claude-partial-messages: {claude_partial_messages}
+  claude-permission-mode: {claude_permission_mode}
+  claude-model-flag: {claude_model_flag}
+  claude-no-session-persistence: {claude_no_session_persistence}
+  claude-verbose: {claude_verbose}
+  claude-auth-ready: {claude_auth_ready}
+  claude-auth-method: {claude_auth_method}
+  claude-api-provider: {claude_api_provider}
+  claude-subscription: {claude_subscription}
+  claude-issue: {claude_issue}
 guidance:
-{codex_guidance}  claude-next-step: wait for the Claude adapter before configuring a Claude ACP harness
-planned-capabilities:
+{codex_guidance}{claude_guidance}planned-capabilities:
   initialize: {initialize}
   session/new: {new_session}
   session/prompt: {prompt}
@@ -94,6 +109,30 @@ redaction-ready: {redaction_ready}
         codex_exec_cwd_flag = yes_no(codex_runtime.supports_cwd_flag),
         codex_issue = codex_runtime.issue.as_deref().unwrap_or("none"),
         codex_guidance = codex_guidance,
+        claude_ready = yes_no(claude_runtime.ready),
+        claude_path = claude_runtime
+            .executable_path
+            .as_deref()
+            .map(Path::display)
+            .map(|path| path.to_string())
+            .unwrap_or_else(|| "none".to_string()),
+        claude_version = claude_runtime.version.as_deref().unwrap_or("unknown"),
+        claude_print = yes_no(claude_runtime.supports_print),
+        claude_stream_json = yes_no(claude_runtime.supports_stream_json),
+        claude_partial_messages = yes_no(claude_runtime.supports_partial_messages),
+        claude_permission_mode = yes_no(claude_runtime.supports_permission_mode),
+        claude_model_flag = yes_no(claude_runtime.supports_model_flag),
+        claude_no_session_persistence = yes_no(claude_runtime.supports_no_session_persistence),
+        claude_verbose = yes_no(claude_runtime.supports_verbose),
+        claude_auth_ready = yes_no(claude_runtime.auth_ready),
+        claude_auth_method = claude_runtime.auth_method.as_deref().unwrap_or("unknown"),
+        claude_api_provider = claude_runtime.api_provider.as_deref().unwrap_or("unknown"),
+        claude_subscription = claude_runtime
+            .subscription_type
+            .as_deref()
+            .unwrap_or("unknown"),
+        claude_issue = claude_runtime.issue.as_deref().unwrap_or("none"),
+        claude_guidance = claude_guidance,
         initialize = yes_no(capabilities.initialize),
         new_session = yes_no(capabilities.sessions.new_session),
         prompt = yes_no(capabilities.sessions.prompt),
@@ -157,8 +196,10 @@ mod tests {
         assert!(report.contains("experimental: yes"));
         assert!(report.contains("runtime-readiness:"));
         assert!(report.contains("codex-ready:"));
+        assert!(report.contains("claude-ready:"));
         assert!(report.contains("guidance:"));
         assert!(report.contains("codex-next-step:"));
+        assert!(report.contains("claude-next-step:"));
         assert!(report.contains("metrics-summary:"));
         assert!(report.contains("loadSession: no"));
         assert!(report.contains("recorded-sessions:"));
