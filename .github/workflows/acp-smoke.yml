@@ -1,0 +1,104 @@
+name: ACP Smoke
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/acp-smoke.yml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "src/**"
+      - "gui/**"
+      - "examples/acp/**"
+      - "README.md"
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/acp-smoke.yml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "src/**"
+      - "gui/**"
+      - "examples/acp/**"
+      - "README.md"
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: gui/package-lock.json
+
+      - name: Setup Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustc -V
+          cargo -V
+
+      - name: Cache Rust dependencies and build outputs
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+            gui/src-tauri/target
+          key: ${{ runner.os }}-acp-rust-${{ hashFiles('Cargo.lock', 'gui/src-tauri/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-acp-rust-
+
+      - name: Run Rust tests
+        run: cargo test
+
+      - name: Run Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: ACP doctor smoke
+        run: |
+          set -euo pipefail
+          cargo run --quiet -- acp doctor > /tmp/acp-doctor.txt
+          grep -F "ACP doctor" /tmp/acp-doctor.txt
+          grep -F "command: opengateway acp" /tmp/acp-doctor.txt
+          grep -F "runtime-readiness:" /tmp/acp-doctor.txt
+
+      - name: ACP snapshot smoke
+        run: |
+          set -euo pipefail
+          cargo run --quiet -- acp snapshot > /tmp/acp-snapshot.json
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          payload = json.loads(Path("/tmp/acp-snapshot.json").read_text())
+          assert payload["experimental"] is True
+          assert payload["command"] == "opengateway acp"
+          assert payload["transport"] == "stdio"
+          assert payload["process_model"] == "one-session-one-subprocess"
+          assert isinstance(payload["agents"], list)
+          assert isinstance(payload["issues"], list)
+          assert isinstance(payload["sessions"], list)
+          assert any(agent["kind"] == "codex" for agent in payload["agents"])
+          assert any(agent["kind"] == "claude" for agent in payload["agents"])
+          PY
+
+      - name: Install GUI dependencies
+        working-directory: gui
+        run: npm ci
+
+      - name: Build GUI
+        working-directory: gui
+        run: npm run build
