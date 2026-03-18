@@ -5,6 +5,9 @@ use crate::acp::session::{
 use anyhow::{bail, Context, Result};
 use clap::Args;
 use serde_json::Value;
+use std::env;
+#[cfg(windows)]
+use std::ffi::OsString;
 use std::io::{BufRead, BufReader, Write};
 #[cfg(unix)]
 use std::os::unix::process::CommandExt as _;
@@ -22,6 +25,19 @@ pub const SCAFFOLD_NOTE: &str =
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 const RUNTIME_POLL_INTERVAL: Duration = Duration::from_millis(25);
+const CODEX_EXECUTABLE: &str = "codex";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodexRuntimeReadiness {
+    pub executable_path: Option<PathBuf>,
+    pub version: Option<String>,
+    pub supports_json: bool,
+    pub supports_ephemeral: bool,
+    pub supports_skip_git_repo_check: bool,
+    pub supports_cwd_flag: bool,
+    pub ready: bool,
+    pub issue: Option<String>,
+}
 
 #[derive(Debug, Args)]
 pub struct CodexRuntimeArgs {
@@ -142,6 +158,120 @@ pub fn command_codex_runtime(args: CodexRuntimeArgs) -> Result<()> {
     Ok(())
 }
 
+pub fn inspect_runtime() -> CodexRuntimeReadiness {
+    let Some(executable_path) = resolve_executable_path(CODEX_EXECUTABLE) else {
+        return CodexRuntimeReadiness {
+            executable_path: None,
+            version: None,
+            supports_json: false,
+            supports_ephemeral: false,
+            supports_skip_git_repo_check: false,
+            supports_cwd_flag: false,
+            ready: false,
+            issue: Some("`codex` was not found on PATH".to_string()),
+        };
+    };
+
+    let version_output = match Command::new(&executable_path).arg("--version").output() {
+        Ok(output) => output,
+        Err(error) => {
+            return CodexRuntimeReadiness {
+                executable_path: Some(executable_path),
+                version: None,
+                supports_json: false,
+                supports_ephemeral: false,
+                supports_skip_git_repo_check: false,
+                supports_cwd_flag: false,
+                ready: false,
+                issue: Some(format!("failed to run `codex --version`: {error}")),
+            };
+        }
+    };
+    if !version_output.status.success() {
+        return CodexRuntimeReadiness {
+            executable_path: Some(executable_path),
+            version: None,
+            supports_json: false,
+            supports_ephemeral: false,
+            supports_skip_git_repo_check: false,
+            supports_cwd_flag: false,
+            ready: false,
+            issue: Some(format!(
+                "`codex --version` exited with {}",
+                version_output.status
+            )),
+        };
+    }
+    let version = command_output_text(&version_output.stdout, &version_output.stderr);
+
+    let help_output = match Command::new(&executable_path).args(["exec", "--help"]).output() {
+        Ok(output) => output,
+        Err(error) => {
+            return CodexRuntimeReadiness {
+                executable_path: Some(executable_path),
+                version,
+                supports_json: false,
+                supports_ephemeral: false,
+                supports_skip_git_repo_check: false,
+                supports_cwd_flag: false,
+                ready: false,
+                issue: Some(format!("failed to run `codex exec --help`: {error}")),
+            };
+        }
+    };
+    if !help_output.status.success() {
+        return CodexRuntimeReadiness {
+            executable_path: Some(executable_path),
+            version,
+            supports_json: false,
+            supports_ephemeral: false,
+            supports_skip_git_repo_check: false,
+            supports_cwd_flag: false,
+            ready: false,
+            issue: Some(format!(
+                "`codex exec --help` exited with {}",
+                help_output.status
+            )),
+        };
+    }
+
+    let help_text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&help_output.stdout),
+        String::from_utf8_lossy(&help_output.stderr)
+    );
+    let capabilities = parse_exec_help_capabilities(&help_text);
+    let mut missing_flags = Vec::new();
+    if !capabilities.supports_json {
+        missing_flags.push("--json");
+    }
+    if !capabilities.supports_ephemeral {
+        missing_flags.push("--ephemeral");
+    }
+    if !capabilities.supports_skip_git_repo_check {
+        missing_flags.push("--skip-git-repo-check");
+    }
+    if !capabilities.supports_cwd_flag {
+        missing_flags.push("-C/--cd");
+    }
+
+    CodexRuntimeReadiness {
+        executable_path: Some(executable_path),
+        version,
+        supports_json: capabilities.supports_json,
+        supports_ephemeral: capabilities.supports_ephemeral,
+        supports_skip_git_repo_check: capabilities.supports_skip_git_repo_check,
+        supports_cwd_flag: capabilities.supports_cwd_flag,
+        ready: missing_flags.is_empty(),
+        issue: (!missing_flags.is_empty()).then(|| {
+            format!(
+                "`codex exec --help` is missing required flags: {}",
+                missing_flags.join(", ")
+            )
+        }),
+    }
+}
+
 pub fn build_codex_prompt(prompt: &[PromptBlock], mcp_server_count: usize) -> Result<String> {
     let text_blocks = prompt
         .iter()
@@ -218,6 +348,96 @@ fn spawn_runtime_input_reader(input_tx: Sender<RuntimeInput>) -> JoinHandle<()> 
             }
         }
     })
+}
+
+fn command_output_text(stdout: &[u8], stderr: &[u8]) -> Option<String> {
+    let stdout = String::from_utf8_lossy(stdout);
+    let trimmed_stdout = stdout.trim();
+    if !trimmed_stdout.is_empty() {
+        return Some(trimmed_stdout.to_string());
+    }
+
+    let stderr = String::from_utf8_lossy(stderr);
+    let trimmed_stderr = stderr.trim();
+    if !trimmed_stderr.is_empty() {
+        return Some(trimmed_stderr.to_string());
+    }
+
+    None
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ExecHelpCapabilities {
+    supports_json: bool,
+    supports_ephemeral: bool,
+    supports_skip_git_repo_check: bool,
+    supports_cwd_flag: bool,
+}
+
+fn parse_exec_help_capabilities(help: &str) -> ExecHelpCapabilities {
+    ExecHelpCapabilities {
+        supports_json: help.contains("--json"),
+        supports_ephemeral: help.contains("--ephemeral"),
+        supports_skip_git_repo_check: help.contains("--skip-git-repo-check"),
+        supports_cwd_flag: help.contains("-C, --cd") || help.contains("--cd <DIR>"),
+    }
+}
+
+fn resolve_executable_path(command: &str) -> Option<PathBuf> {
+    let command_path = Path::new(command);
+    if command_path.components().count() > 1 {
+        return is_existing_file(command_path).then(|| command_path.to_path_buf());
+    }
+
+    let path_var = env::var_os("PATH")?;
+    for directory in env::split_paths(&path_var) {
+        #[cfg(windows)]
+        {
+            for candidate in windows_command_candidates(&directory, command) {
+                if is_existing_file(&candidate) {
+                    return Some(candidate);
+                }
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            let candidate = directory.join(command);
+            if is_existing_file(&candidate) {
+                return Some(candidate);
+            }
+        }
+    }
+
+    None
+}
+
+fn is_existing_file(path: &Path) -> bool {
+    path.metadata().map(|metadata| metadata.is_file()).unwrap_or(false)
+}
+
+#[cfg(windows)]
+fn windows_command_candidates(directory: &Path, command: &str) -> Vec<PathBuf> {
+    let command_path = Path::new(command);
+    if command_path.extension().is_some() {
+        return vec![directory.join(command)];
+    }
+
+    let path_ext = env::var_os("PATHEXT")
+        .unwrap_or_else(|| OsString::from(".COM;.EXE;.BAT;.CMD"));
+    path_ext
+        .to_string_lossy()
+        .split(';')
+        .filter(|ext| !ext.is_empty())
+        .map(|ext| {
+            let trimmed = ext.trim();
+            let suffix = if trimmed.starts_with('.') {
+                trimmed.to_string()
+            } else {
+                format!(".{trimmed}")
+            };
+            directory.join(format!("{command}{suffix}"))
+        })
+        .collect()
 }
 
 impl CodexPromptExecution {
@@ -492,7 +712,9 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{build_codex_prompt, parse_codex_update, truncate_output};
+    use super::{
+        build_codex_prompt, parse_codex_update, parse_exec_help_capabilities, truncate_output,
+    };
     use crate::acp::session::ChildRuntimeUpdate;
     use crate::acp::session::PromptBlock;
 
@@ -582,5 +804,21 @@ mod tests {
         let preview = truncate_output(&large);
         assert!(preview.ends_with('…'));
         assert!(preview.len() < large.len());
+    }
+
+    #[test]
+    fn parse_exec_help_capabilities_detects_required_flags() {
+        let help = "\
+Usage: codex exec [OPTIONS]
+  -C, --cd <DIR>
+      --skip-git-repo-check
+      --ephemeral
+      --json
+";
+        let capabilities = parse_exec_help_capabilities(help);
+        assert!(capabilities.supports_json);
+        assert!(capabilities.supports_ephemeral);
+        assert!(capabilities.supports_skip_git_repo_check);
+        assert!(capabilities.supports_cwd_flag);
     }
 }

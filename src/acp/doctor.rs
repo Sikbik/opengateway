@@ -1,4 +1,4 @@
-use super::adapters::supported_agents;
+use super::adapters::{codex, supported_agents};
 use super::capabilities::planned_capabilities;
 use super::errors::error_categories;
 use super::journal::{collect_session_summaries, scaffold_session_files};
@@ -8,10 +8,12 @@ use super::session::session_states;
 use super::supervisor::PROCESS_MODEL;
 use super::transport::TRANSPORT_NAME;
 use crate::paths::AppPaths;
+use std::path::Path;
 
 pub fn render_doctor_report(paths: &AppPaths) -> String {
     let capabilities = planned_capabilities();
     let sample_files = scaffold_session_files(paths);
+    let codex_runtime = codex::inspect_runtime();
     let agents = supported_agents()
         .iter()
         .map(|agent| format!("{} ({})", agent.runtime_name, agent.status))
@@ -32,6 +34,18 @@ transport: {transport}
 jsonrpc: {jsonrpc}
 process-model: {process_model}
 supported-agents: {agents}
+runtime-readiness:
+  acp-runtime-dirs: yes
+  codex-ready: {codex_ready}
+  codex-path: {codex_path}
+  codex-version: {codex_version}
+  codex-exec-json: {codex_exec_json}
+  codex-exec-ephemeral: {codex_exec_ephemeral}
+  codex-exec-skip-git-repo-check: {codex_exec_skip_git_repo_check}
+  codex-exec-cwd-flag: {codex_exec_cwd_flag}
+  codex-issue: {codex_issue}
+  claude-ready: no
+  claude-issue: adapter not implemented
 planned-capabilities:
   initialize: {initialize}
   session/new: {new_session}
@@ -57,6 +71,19 @@ redaction-ready: {redaction_ready}
         jsonrpc = JSONRPC_VERSION,
         process_model = PROCESS_MODEL,
         agents = agents,
+        codex_ready = yes_no(codex_runtime.ready),
+        codex_path = codex_runtime
+            .executable_path
+            .as_deref()
+            .map(Path::display)
+            .map(|path| path.to_string())
+            .unwrap_or_else(|| "none".to_string()),
+        codex_version = codex_runtime.version.as_deref().unwrap_or("unknown"),
+        codex_exec_json = yes_no(codex_runtime.supports_json),
+        codex_exec_ephemeral = yes_no(codex_runtime.supports_ephemeral),
+        codex_exec_skip_git_repo_check = yes_no(codex_runtime.supports_skip_git_repo_check),
+        codex_exec_cwd_flag = yes_no(codex_runtime.supports_cwd_flag),
+        codex_issue = codex_runtime.issue.as_deref().unwrap_or("none"),
         initialize = yes_no(capabilities.initialize),
         new_session = yes_no(capabilities.sessions.new_session),
         prompt = yes_no(capabilities.sessions.prompt),
@@ -96,6 +123,8 @@ mod tests {
         let paths = build_paths().expect("paths");
         let report = render_doctor_report(&paths);
         assert!(report.contains("experimental: yes"));
+        assert!(report.contains("runtime-readiness:"));
+        assert!(report.contains("codex-ready:"));
         assert!(report.contains("loadSession: no"));
         assert!(report.contains("recorded-sessions:"));
     }
