@@ -134,6 +134,35 @@ If you run `opengateway control` outside the repo, pass the checkout explicitly:
 opengateway control --workspace /path/to/opengateway
 ```
 
+## Experimental ACP
+
+The `acp` branch also has an experimental ACP lane for editor/harness integrations.
+
+Current scope:
+- real adapter: `codex`
+- placeholder only: `claude`
+- transport: stdio
+
+Useful commands:
+
+```bash
+opengateway acp doctor
+opengateway acp serve --agent codex
+opengateway acp sessions
+opengateway acp inspect <session-id>
+```
+
+Use the tracked setup examples here:
+- `examples/acp/README.md`
+- `examples/acp/zed-settings.jsonc`
+- `examples/acp/jetbrains-acp.json`
+- `examples/acp/TROUBLESHOOTING.md`
+
+Important ACP rule:
+- keep the editor, `opengateway`, and the Codex runtime in the same environment
+
+This ACP lane is experimental and separate from the current HTTP / Factory gateway lane.
+
 ## Desktop builds
 
 If you just want desktop artifacts, use GitHub Actions instead of setting up a local packaging toolchain.

@@ -1,0 +1,11 @@
+{
+  // Merge this into Zed's settings.json.
+  "agent_servers": {
+    "OpenGateway Codex": {
+      "type": "custom",
+      "command": "~/.local/bin/opengateway",
+      "args": ["acp", "serve", "--agent", "codex"],
+      "env": {}
+    }
+  }
+}

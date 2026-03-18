@@ -1,0 +1,13 @@
+{
+  "default_mcp_settings": {
+    "use_custom_mcp": true,
+    "use_idea_mcp": false
+  },
+  "agent_servers": {
+    "OpenGateway Codex": {
+      "command": "/home/your-user/.local/bin/opengateway",
+      "args": ["acp", "serve", "--agent", "codex"],
+      "env": {}
+    }
+  }
+}
