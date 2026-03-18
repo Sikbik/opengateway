@@ -40,6 +40,13 @@ export async function call<T>(
       return fetchBridge<T>("/snapshot");
     case "load_acp_snapshot":
       return fetchBridge<T>("/acp-snapshot");
+    case "load_acp_session_detail": {
+      const params = new URLSearchParams({
+        sessionId: String(args?.sessionId ?? ""),
+        limit: String(args?.limit ?? 12),
+      });
+      return fetchBridge<T>(`/acp-inspect?${params.toString()}`);
+    }
     case "tail_logs":
       return fetchBridge<T>(`/logs?limit=${args?.limit ?? 160}`);
     case "start_gateway":

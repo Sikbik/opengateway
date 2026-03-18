@@ -57,6 +57,22 @@ pub async fn load_acp_snapshot(app: AppHandle) -> Result<Value, String> {
 }
 
 #[tauri::command]
+pub async fn load_acp_session_detail(
+    app: AppHandle,
+    session_id: String,
+    limit: Option<usize>,
+) -> Result<Value, String> {
+    let args = vec![
+        "gui-acp-inspect".to_string(),
+        "--session-id".to_string(),
+        session_id,
+        "--limit".to_string(),
+        limit.unwrap_or(12).to_string(),
+    ];
+    run_json_command_owned(&app, args).await
+}
+
+#[tauri::command]
 pub async fn tail_logs(app: AppHandle, limit: Option<usize>) -> Result<Vec<String>, String> {
     let args = vec![
         "gui-logs".to_string(),

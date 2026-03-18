@@ -109,3 +109,16 @@ export interface AcpGuiSession {
   journalPath: string;
   logPath: string;
 }
+
+export interface AcpGuiSessionDetail {
+  summary: AcpGuiSession;
+  metrics: AcpGuiMetrics;
+  recentEvents: AcpGuiSessionEvent[];
+  recentLogs: string[];
+}
+
+export interface AcpGuiSessionEvent {
+  timestampMs: number | null;
+  event: string | null;
+  dataPreview: string;
+}

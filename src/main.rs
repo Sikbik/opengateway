@@ -110,6 +110,8 @@ enum Commands {
     GuiSnapshot,
     #[command(name = "gui-acp-snapshot", hide = true)]
     GuiAcpSnapshot,
+    #[command(name = "gui-acp-inspect", hide = true)]
+    GuiAcpInspect(GuiAcpInspectArgs),
     #[command(name = "gui-logs", hide = true)]
     GuiLogs(GuiLogsArgs),
     #[command(name = "gui-start", hide = true)]
@@ -386,6 +388,14 @@ struct GuiLogsArgs {
 }
 
 #[derive(Debug, clap::Args)]
+struct GuiAcpInspectArgs {
+    #[arg(long)]
+    session_id: String,
+    #[arg(long, default_value_t = 12)]
+    limit: usize,
+}
+
+#[derive(Debug, clap::Args)]
 struct GuiSetDroidModelArgs {
     #[arg(long)]
     path: PathBuf,
@@ -458,6 +468,9 @@ fn run_cli() -> Result<()> {
         Commands::Doctor(args) => command_doctor(args),
         Commands::GuiSnapshot => gui_api::print_snapshot_json(),
         Commands::GuiAcpSnapshot => gui_api::print_acp_snapshot_json(),
+        Commands::GuiAcpInspect(args) => {
+            gui_api::print_acp_session_detail_json(&args.session_id, args.limit)
+        }
         Commands::GuiLogs(args) => gui_api::print_logs_json(args.limit),
         Commands::GuiStart => gui_api::print_command_result_json(&["start"]),
         Commands::GuiStop => gui_api::print_command_result_json(&["stop"]),

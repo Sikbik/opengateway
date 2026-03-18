@@ -65,6 +65,25 @@ function factoryControlBridge(): Plugin {
             return;
           }
 
+          if (req.method === "GET" && url.pathname === "/acp-inspect") {
+            const sessionId = url.searchParams.get("sessionId")?.trim();
+            if (!sessionId) {
+              res.statusCode = 400;
+              res.end("sessionId is required");
+              return;
+            }
+            writeJson(
+              await execGateway([
+                "gui-acp-inspect",
+                "--session-id",
+                sessionId,
+                "--limit",
+                url.searchParams.get("limit") ?? "12",
+              ]),
+            );
+            return;
+          }
+
           if (req.method === "GET" && url.pathname === "/logs") {
             writeJson(
               await execGateway([

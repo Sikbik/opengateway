@@ -11,6 +11,7 @@ import {
 import { call, runtimeMode } from "./runtime";
 import type {
   AcpGuiSnapshot,
+  AcpGuiSessionDetail,
   AppSnapshot,
   CommandResult,
   DroidRecord,
@@ -380,6 +381,8 @@ function ThemedSelect({
 function App() {
   const [snapshot, setSnapshot] = useState<AppSnapshot | null>(null);
   const [acpSnapshot, setAcpSnapshot] = useState<AcpGuiSnapshot | null>(null);
+  const [acpSessionDetail, setAcpSessionDetail] =
+    useState<AcpGuiSessionDetail | null>(null);
   const [logs, setLogs] = useState<string[]>([]);
   const [doctorOutput, setDoctorOutput] = useState("");
   const [activeTab, setActiveTab] = useState<TabKey>("dashboard");
@@ -401,6 +404,10 @@ function App() {
   });
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [acpError, setAcpError] = useState<string | null>(null);
+  const [acpDetailError, setAcpDetailError] = useState<string | null>(null);
+  const [selectedAcpSessionId, setSelectedAcpSessionId] = useState<string | null>(
+    null,
+  );
   const [error, setError] = useState<string | null>(null);
   const mounted = useRef(true);
   const mode = runtimeMode();
@@ -452,15 +459,50 @@ function App() {
       if (!mounted.current) {
         return;
       }
+      const nextSessionId = nextSnapshot.sessions.some(
+        (session) => session.sessionId === selectedAcpSessionId,
+      )
+        ? selectedAcpSessionId
+        : nextSnapshot.sessions[0]?.sessionId ?? null;
       startTransition(() => {
         setAcpSnapshot(nextSnapshot);
+        setSelectedAcpSessionId(nextSessionId);
       });
       setAcpError(null);
+      if (nextSessionId) {
+        await refreshAcpSessionDetail(nextSessionId);
+      } else if (mounted.current) {
+        startTransition(() => {
+          setAcpSessionDetail(null);
+        });
+        setAcpDetailError(null);
+      }
     } catch (cause) {
       if (!mounted.current) {
         return;
       }
       setAcpError(String(cause));
+    }
+  }
+
+  async function refreshAcpSessionDetail(sessionId: string) {
+    try {
+      const nextDetail = await call<AcpGuiSessionDetail>("load_acp_session_detail", {
+        sessionId,
+        limit: 12,
+      });
+      if (!mounted.current) {
+        return;
+      }
+      startTransition(() => {
+        setAcpSessionDetail(nextDetail);
+      });
+      setAcpDetailError(null);
+    } catch (cause) {
+      if (!mounted.current) {
+        return;
+      }
+      setAcpDetailError(String(cause));
     }
   }
 
@@ -773,6 +815,8 @@ function App() {
   const logEntries = logs.slice().reverse().map(parseLogLine);
   const acpAgents = acpSnapshot?.agents ?? [];
   const acpSessions = acpSnapshot?.sessions ?? [];
+  const selectedAcpSession =
+    acpSessions.find((session) => session.sessionId === selectedAcpSessionId) ?? null;
   const readyAgentCount = acpAgents.filter((agent) => agent.ready).length;
   const acpHealthTone: HealthState = acpSnapshot
     ? readyAgentCount > 0
@@ -1597,9 +1641,18 @@ function App() {
               <div className="acp-session-list">
                 {acpSessions.length > 0 ? (
                   acpSessions.map((session) => (
-                    <article
+                    <button
                       key={session.sessionId}
-                      className="acp-session-row"
+                      type="button"
+                      className={
+                        session.sessionId === selectedAcpSessionId
+                          ? "acp-session-row acp-session-row--active"
+                          : "acp-session-row"
+                      }
+                      onClick={() => {
+                        setSelectedAcpSessionId(session.sessionId);
+                        void refreshAcpSessionDetail(session.sessionId);
+                      }}
                     >
                       <div className="acp-session-row__main">
                         <div className="acp-session-row__topline">
@@ -1630,7 +1683,7 @@ function App() {
                           <dd>{compactValue(session.logPath, 18)}</dd>
                         </div>
                       </dl>
-                    </article>
+                    </button>
                   ))
                 ) : (
                   <div className="empty-state">
@@ -1638,6 +1691,110 @@ function App() {
                   </div>
                 )}
               </div>
+            </article>
+
+            <article className="panel factory-card factory-card--wide acp-detail">
+              <div className="panel-heading panel-heading--tight">
+                <div>
+                  <p className="eyebrow">Session Detail</p>
+                  <h2>
+                    {selectedAcpSession?.sessionId ??
+                      acpSessionDetail?.summary.sessionId ??
+                      "Choose a session"}
+                  </h2>
+                </div>
+                {acpSessionDetail ? (
+                  <span className="datum">
+                    {acpSessionDetail.metrics.promptsCompleted} completed
+                  </span>
+                ) : null}
+              </div>
+
+              {acpDetailError ? (
+                <div className="acp-inline-error">{acpDetailError}</div>
+              ) : null}
+
+              {acpSessionDetail ? (
+                <>
+                  <div className="acp-detail__metrics">
+                    <div className="gateway-stage__datum">
+                      <span>Completed</span>
+                      <strong>{acpSessionDetail.metrics.promptsCompleted}</strong>
+                    </div>
+                    <div className="gateway-stage__datum">
+                      <span>Cancelled</span>
+                      <strong>{acpSessionDetail.metrics.promptsCancelled}</strong>
+                    </div>
+                    <div className="gateway-stage__datum">
+                      <span>Runtime failures</span>
+                      <strong>{acpSessionDetail.metrics.runtimeFailures}</strong>
+                    </div>
+                    <div className="gateway-stage__datum">
+                      <span>Working dir</span>
+                      <strong>
+                        {acpSessionDetail.summary.cwd ?? "No working directory recorded"}
+                      </strong>
+                    </div>
+                  </div>
+
+                  <div className="acp-detail__grid">
+                    <section className="acp-detail__panel">
+                      <div className="label-row">
+                        <p className="eyebrow">Recent Events</p>
+                      </div>
+                      <div className="acp-event-list">
+                        {acpSessionDetail.recentEvents.length > 0 ? (
+                          acpSessionDetail.recentEvents.map((event, index) => (
+                            <article
+                              key={`${event.timestampMs ?? "none"}:${event.event ?? "unknown"}:${index}`}
+                              className="acp-event-row"
+                            >
+                              <div className="acp-event-row__meta">
+                                <span className="chip chip--inherit">
+                                  {formatSessionEvent(event.event)}
+                                </span>
+                                <span className="acp-event-row__time">
+                                  {formatSessionTimestamp(event.timestampMs)}
+                                </span>
+                              </div>
+                              <pre className="acp-event-row__data">
+                                {event.dataPreview}
+                              </pre>
+                            </article>
+                          ))
+                        ) : (
+                          <div className="empty-state">
+                            No recent ACP events were recorded for this session.
+                          </div>
+                        )}
+                      </div>
+                    </section>
+
+                    <section className="acp-detail__panel">
+                      <div className="label-row">
+                        <p className="eyebrow">Recent Log Lines</p>
+                      </div>
+                      <div className="log-block log-block--compact acp-detail__logs">
+                        {acpSessionDetail.recentLogs.length > 0 ? (
+                          acpSessionDetail.recentLogs.map((line, index) => (
+                            <div key={`${line}:${index}`} className="acp-detail__log-line">
+                              {line}
+                            </div>
+                          ))
+                        ) : (
+                          <div className="empty-state">
+                            No recent ACP log lines were recorded for this session.
+                          </div>
+                        )}
+                      </div>
+                    </section>
+                  </div>
+                </>
+              ) : (
+                <div className="empty-state">
+                  Select a recorded ACP session to inspect recent events and logs.
+                </div>
+              )}
             </article>
           </div>
         </section>

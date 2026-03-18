@@ -123,6 +123,23 @@ pub struct AcpGuiSession {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct AcpGuiSessionDetail {
+    summary: AcpGuiSession,
+    metrics: AcpGuiMetrics,
+    recent_events: Vec<AcpGuiSessionEvent>,
+    recent_logs: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AcpGuiSessionEvent {
+    timestamp_ms: Option<i64>,
+    event: Option<String>,
+    data_preview: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ModelOption {
     display_name: String,
     model: String,
@@ -162,6 +179,15 @@ pub fn print_acp_snapshot_json() -> Result<()> {
     println!(
         "{}",
         serde_json::to_string(&snapshot).context("failed to encode ACP snapshot")?
+    );
+    Ok(())
+}
+
+pub fn print_acp_session_detail_json(session_id: &str, limit: usize) -> Result<()> {
+    let detail = load_acp_session_detail(session_id, limit)?;
+    println!(
+        "{}",
+        serde_json::to_string(&detail).context("failed to encode ACP session detail")?
     );
     Ok(())
 }
@@ -259,6 +285,51 @@ fn load_acp_snapshot() -> Result<AcpGuiSnapshot> {
             })
             .collect(),
     })
+}
+
+fn load_acp_session_detail(session_id: &str, limit: usize) -> Result<AcpGuiSessionDetail> {
+    let paths = build_paths()?;
+    paths.ensure_runtime_dirs()?;
+    let detail = crate::acp::journal::inspect_session(&paths, session_id, limit)?
+        .ok_or_else(|| anyhow!("unknown ACP session: {session_id}"))?;
+
+    Ok(AcpGuiSessionDetail {
+        summary: AcpGuiSession {
+            session_id: detail.summary.session_id,
+            prompt_count: detail.summary.prompt_count,
+            cwd: detail.summary.cwd,
+            last_event: detail.summary.last_event,
+            last_timestamp_ms: detail.summary.last_timestamp_ms.map(|value| value as i64),
+            journal_path: detail.summary.journal_path.display().to_string(),
+            log_path: detail.summary.log_path.display().to_string(),
+        },
+        metrics: AcpGuiMetrics {
+            sessions_created: detail.metrics.sessions_created,
+            prompts_completed: detail.metrics.prompts_completed,
+            prompts_cancelled: detail.metrics.prompts_cancelled,
+            runtime_failures: detail.metrics.runtime_failures,
+        },
+        recent_events: detail
+            .recent_events
+            .into_iter()
+            .map(|event| AcpGuiSessionEvent {
+                timestamp_ms: event.timestamp_ms.map(|value| value as i64),
+                event: event.event,
+                data_preview: summarize_event_data(&event.data),
+            })
+            .collect(),
+        recent_logs: detail.recent_logs,
+    })
+}
+
+fn summarize_event_data(value: &Value) -> String {
+    let compact = serde_json::to_string(value).unwrap_or_else(|_| "null".to_string());
+    const MAX_LEN: usize = 220;
+    if compact.len() <= MAX_LEN {
+        compact
+    } else {
+        format!("{}...", &compact[..MAX_LEN])
+    }
 }
 
 fn environment_snapshot() -> EnvironmentSnapshot {

@@ -789,11 +789,30 @@ pre {
   gap: 14px;
   padding: 12px 0;
   border-top: 1px solid rgba(136, 171, 255, 0.1);
+  width: 100%;
+  border-left: 0;
+  border-right: 0;
+  border-bottom: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
 }
 
 .acp-session-row:first-child {
   border-top: 0;
   padding-top: 0;
+}
+
+.acp-session-row:hover,
+.acp-session-row--active {
+  background:
+    linear-gradient(90deg, rgba(25, 223, 164, 0.08), rgba(90, 118, 255, 0.06)),
+    rgba(255, 255, 255, 0.02);
+}
+
+.acp-session-row--active {
+  border-radius: 16px;
 }
 
 .acp-session-row__main {
@@ -835,6 +854,84 @@ pre {
   margin: 0;
   font-size: 0.82rem;
   overflow-wrap: anywhere;
+}
+
+.acp-detail {
+  display: grid;
+  gap: 12px;
+}
+
+.acp-detail__metrics {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.acp-detail__grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.1fr) minmax(0, 0.9fr);
+  gap: 12px;
+}
+
+.acp-detail__panel {
+  display: grid;
+  gap: 10px;
+  min-height: 0;
+}
+
+.acp-event-list {
+  display: grid;
+  gap: 8px;
+}
+
+.acp-event-row {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  border-radius: 16px;
+  border: 1px solid rgba(136, 171, 255, 0.12);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.02), rgba(5, 11, 23, 0.68)),
+    rgba(6, 12, 25, 0.52);
+}
+
+.acp-event-row__meta {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 10px;
+  align-items: center;
+}
+
+.acp-event-row__time {
+  color: var(--muted);
+  font-size: 0.76rem;
+}
+
+.acp-event-row__data {
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: 14px;
+  background: rgba(3, 8, 18, 0.7);
+  border: 1px solid rgba(136, 171, 255, 0.08);
+  color: #d7ffec;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 0.78rem;
+  line-height: 1.45;
+}
+
+.acp-detail__logs {
+  max-height: 360px;
+}
+
+.acp-detail__log-line {
+  padding: 0 0 8px;
+}
+
+.acp-detail__log-line + .acp-detail__log-line {
+  padding-top: 8px;
+  border-top: 1px solid rgba(136, 171, 255, 0.08);
 }
 
 .gateway-stage__copy {
@@ -1783,6 +1880,8 @@ pre {
   .acp-stage__strip,
   .acp-stage__fact-grid,
   .acp-adapters__grid,
+  .acp-detail__metrics,
+  .acp-detail__grid,
   .factory-grid,
   .droid-columns,
   .overview-grid,
@@ -1844,7 +1943,8 @@ pre {
   .droid-row,
   .droid-panel__toggle,
   .droid-row__controls,
-  .acp-adapter-card__head {
+  .acp-adapter-card__head,
+  .acp-event-row__meta {
     grid-template-columns: 1fr;
     flex-direction: column;
   }
