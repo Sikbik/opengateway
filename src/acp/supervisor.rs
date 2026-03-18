@@ -1,4 +1,4 @@
-use super::adapters::AgentKind;
+use super::adapters::{codex, AgentKind};
 use super::session::{
     CancelParams, ChildRuntimeEnvelope, ChildRuntimeRequest, ChildRuntimeResponse,
     ChildRuntimeStopReason, ChildRuntimeUpdate, InProcessMockSession, NewSessionParams, PromptParams,
@@ -238,6 +238,17 @@ impl ProcessSession {
         match runtime_mode {
             RuntimeMode::Subprocess => match agent {
                 AgentKind::Codex => {
+                    let readiness = codex::inspect_runtime();
+                    if !readiness.ready {
+                        let issue = readiness
+                            .issue
+                            .as_deref()
+                            .unwrap_or("unknown Codex runtime issue");
+                        bail!(
+                            "ACP Codex runtime is not ready: {issue}. {}",
+                            codex::spawn_guidance(&readiness)
+                        );
+                    }
                     command
                         .arg("acp-codex-runtime")
                         .arg("--session-id")
@@ -268,7 +279,20 @@ impl ProcessSession {
         command.creation_flags(CREATE_NO_WINDOW);
         apply_allowed_env(&mut command);
 
-        let mut child = command.spawn().context("failed to spawn ACP session runtime")?;
+        let mut child = command.spawn().with_context(|| match agent {
+            AgentKind::Codex => {
+                let readiness = codex::inspect_runtime();
+                let issue = readiness
+                    .issue
+                    .as_deref()
+                    .unwrap_or("failed to start the Codex child runtime");
+                format!(
+                    "failed to spawn ACP session runtime: {issue}. {}",
+                    codex::spawn_guidance(&readiness)
+                )
+            }
+            AgentKind::Claude => "failed to spawn ACP session runtime".to_string(),
+        })?;
         let stdin = child
             .stdin
             .take()

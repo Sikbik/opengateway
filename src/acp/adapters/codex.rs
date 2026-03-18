@@ -272,6 +272,46 @@ pub fn inspect_runtime() -> CodexRuntimeReadiness {
     }
 }
 
+pub fn doctor_guidance(readiness: &CodexRuntimeReadiness) -> Vec<String> {
+    if readiness.executable_path.is_none() {
+        return vec![
+            "Install the Codex CLI and make sure `codex` is on PATH.".to_string(),
+            "Verify the install with `codex --version` before starting an ACP harness."
+                .to_string(),
+        ];
+    }
+
+    if readiness.version.is_none() {
+        return vec![
+            "Run `codex --version` manually. If it fails, repair or reinstall the Codex CLI."
+                .to_string(),
+            "After that, rerun `opengateway acp doctor` to confirm the runtime probe is clean."
+                .to_string(),
+        ];
+    }
+
+    if !readiness.ready {
+        return vec![
+            "Upgrade the Codex CLI so `codex exec --help` exposes `--json`, `--ephemeral`, `--skip-git-repo-check`, and `-C/--cd`."
+                .to_string(),
+            "Validate the flags with `codex exec --help` before starting an ACP harness."
+                .to_string(),
+        ];
+    }
+
+    vec![
+        "Start the harness with `opengateway acp serve --agent codex`.".to_string(),
+        "If prompts still fail, run `codex exec --json --ephemeral --skip-git-repo-check -C <dir> -` manually to inspect the local runtime."
+            .to_string(),
+        "This preflight does not verify Codex account auth; it only checks local runtime readiness."
+            .to_string(),
+    ]
+}
+
+pub fn spawn_guidance(readiness: &CodexRuntimeReadiness) -> String {
+    doctor_guidance(readiness).join(" ")
+}
+
 pub fn build_codex_prompt(prompt: &[PromptBlock], mcp_server_count: usize) -> Result<String> {
     let text_blocks = prompt
         .iter()
@@ -713,10 +753,12 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        build_codex_prompt, parse_codex_update, parse_exec_help_capabilities, truncate_output,
+        build_codex_prompt, doctor_guidance, parse_codex_update, parse_exec_help_capabilities,
+        truncate_output, CodexRuntimeReadiness,
     };
     use crate::acp::session::ChildRuntimeUpdate;
     use crate::acp::session::PromptBlock;
+    use std::path::PathBuf;
 
     #[test]
     fn codex_prompt_requires_text_blocks() {
@@ -820,5 +862,41 @@ Usage: codex exec [OPTIONS]
         assert!(capabilities.supports_ephemeral);
         assert!(capabilities.supports_skip_git_repo_check);
         assert!(capabilities.supports_cwd_flag);
+    }
+
+    #[test]
+    fn doctor_guidance_for_missing_codex_is_actionable() {
+        let readiness = CodexRuntimeReadiness {
+            executable_path: None,
+            version: None,
+            supports_json: false,
+            supports_ephemeral: false,
+            supports_skip_git_repo_check: false,
+            supports_cwd_flag: false,
+            ready: false,
+            issue: Some("`codex` was not found on PATH".to_string()),
+        };
+
+        let guidance = doctor_guidance(&readiness);
+        assert!(guidance[0].contains("Install the Codex CLI"));
+        assert!(guidance[1].contains("codex --version"));
+    }
+
+    #[test]
+    fn doctor_guidance_for_ready_codex_recommends_next_step() {
+        let readiness = CodexRuntimeReadiness {
+            executable_path: Some(PathBuf::from("/tmp/codex")),
+            version: Some("codex-cli 0.114.0".to_string()),
+            supports_json: true,
+            supports_ephemeral: true,
+            supports_skip_git_repo_check: true,
+            supports_cwd_flag: true,
+            ready: true,
+            issue: None,
+        };
+
+        let guidance = doctor_guidance(&readiness);
+        assert!(guidance[0].contains("opengateway acp serve --agent codex"));
+        assert!(guidance[2].contains("does not verify Codex account auth"));
     }
 }

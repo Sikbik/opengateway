@@ -24,6 +24,7 @@ pub fn render_doctor_report(paths: &AppPaths) -> String {
         redact_text("Authorization: Bearer acp-scaffold-secret") != "Authorization: Bearer acp-scaffold-secret";
     let session_summaries = collect_session_summaries(paths).unwrap_or_default();
     let latest_session = session_summaries.first();
+    let codex_guidance = render_guidance_lines("codex", &codex::doctor_guidance(&codex_runtime));
 
     format!(
         "\
@@ -46,6 +47,8 @@ runtime-readiness:
   codex-issue: {codex_issue}
   claude-ready: no
   claude-issue: adapter not implemented
+guidance:
+{codex_guidance}  claude-next-step: wait for the Claude adapter before configuring a Claude ACP harness
 planned-capabilities:
   initialize: {initialize}
   session/new: {new_session}
@@ -84,6 +87,7 @@ redaction-ready: {redaction_ready}
         codex_exec_skip_git_repo_check = yes_no(codex_runtime.supports_skip_git_repo_check),
         codex_exec_cwd_flag = yes_no(codex_runtime.supports_cwd_flag),
         codex_issue = codex_runtime.issue.as_deref().unwrap_or("none"),
+        codex_guidance = codex_guidance,
         initialize = yes_no(capabilities.initialize),
         new_session = yes_no(capabilities.sessions.new_session),
         prompt = yes_no(capabilities.sessions.prompt),
@@ -113,9 +117,27 @@ fn yes_no(value: bool) -> &'static str {
     if value { "yes" } else { "no" }
 }
 
+fn render_guidance_lines(prefix: &str, guidance: &[String]) -> String {
+    if guidance.is_empty() {
+        return format!("  {prefix}-next-step: none\n");
+    }
+
+    guidance
+        .iter()
+        .enumerate()
+        .map(|(index, line)| {
+            if index == 0 {
+                format!("  {prefix}-next-step: {line}\n")
+            } else {
+                format!("  {prefix}-hint-{}: {line}\n", index)
+            }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::render_doctor_report;
+    use super::{render_doctor_report, render_guidance_lines};
     use crate::paths::build_paths;
 
     #[test]
@@ -125,7 +147,19 @@ mod tests {
         assert!(report.contains("experimental: yes"));
         assert!(report.contains("runtime-readiness:"));
         assert!(report.contains("codex-ready:"));
+        assert!(report.contains("guidance:"));
+        assert!(report.contains("codex-next-step:"));
         assert!(report.contains("loadSession: no"));
         assert!(report.contains("recorded-sessions:"));
+    }
+
+    #[test]
+    fn render_guidance_lines_uses_next_step_then_hints() {
+        let rendered = render_guidance_lines(
+            "codex",
+            &["first action".to_string(), "second action".to_string()],
+        );
+        assert!(rendered.contains("codex-next-step: first action"));
+        assert!(rendered.contains("codex-hint-1: second action"));
     }
 }
