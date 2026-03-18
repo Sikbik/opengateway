@@ -405,6 +405,8 @@ function App() {
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [acpError, setAcpError] = useState<string | null>(null);
   const [acpDetailError, setAcpDetailError] = useState<string | null>(null);
+  const [acpDetailNotice, setAcpDetailNotice] = useState<string | null>(null);
+  const [acpDetailLimit, setAcpDetailLimit] = useState(12);
   const [selectedAcpSessionId, setSelectedAcpSessionId] = useState<string | null>(
     null,
   );
@@ -470,7 +472,7 @@ function App() {
       });
       setAcpError(null);
       if (nextSessionId) {
-        await refreshAcpSessionDetail(nextSessionId);
+        await refreshAcpSessionDetail(nextSessionId, acpDetailLimit);
       } else if (mounted.current) {
         startTransition(() => {
           setAcpSessionDetail(null);
@@ -485,11 +487,11 @@ function App() {
     }
   }
 
-  async function refreshAcpSessionDetail(sessionId: string) {
+  async function refreshAcpSessionDetail(sessionId: string, limit = acpDetailLimit) {
     try {
       const nextDetail = await call<AcpGuiSessionDetail>("load_acp_session_detail", {
         sessionId,
-        limit: 12,
+        limit,
       });
       if (!mounted.current) {
         return;
@@ -532,7 +534,20 @@ function App() {
     return () => {
       window.clearInterval(timer);
     };
-  }, [activeTab]);
+  }, [activeTab, selectedAcpSessionId, acpDetailLimit]);
+
+  async function copyAcpPath(label: string, value: string) {
+    try {
+      if (!navigator.clipboard?.writeText) {
+        throw new Error("Clipboard write is unavailable in this runtime.");
+      }
+      await navigator.clipboard.writeText(value);
+      setAcpDetailNotice(`${label} copied.`);
+      setAcpDetailError(null);
+    } catch (cause) {
+      setAcpDetailError(String(cause));
+    }
+  }
 
   async function runAction(
     action: string,
@@ -1651,7 +1666,8 @@ function App() {
                       }
                       onClick={() => {
                         setSelectedAcpSessionId(session.sessionId);
-                        void refreshAcpSessionDetail(session.sessionId);
+                        setAcpDetailNotice(null);
+                        void refreshAcpSessionDetail(session.sessionId, acpDetailLimit);
                       }}
                     >
                       <div className="acp-session-row__main">
@@ -1713,6 +1729,61 @@ function App() {
               {acpDetailError ? (
                 <div className="acp-inline-error">{acpDetailError}</div>
               ) : null}
+              <div className="acp-detail__toolbar">
+                <div className="acp-detail__toolbar-group">
+                  {[12, 40, 120].map((limit) => (
+                    <button
+                      key={limit}
+                      type="button"
+                      className={
+                        limit === acpDetailLimit
+                          ? "toggle-chip toggle-chip--active"
+                          : "toggle-chip"
+                      }
+                      onClick={() => {
+                        setAcpDetailLimit(limit);
+                        if (selectedAcpSessionId) {
+                          void refreshAcpSessionDetail(selectedAcpSessionId, limit);
+                        }
+                      }}
+                    >
+                      Tail {limit}
+                    </button>
+                  ))}
+                </div>
+                <div className="acp-detail__toolbar-group">
+                  <button
+                    type="button"
+                    className="button button--utility"
+                    disabled={!acpSessionDetail}
+                    onClick={() =>
+                      acpSessionDetail
+                        ? void copyAcpPath(
+                            "Journal path",
+                            acpSessionDetail.summary.journalPath,
+                          )
+                        : undefined
+                    }
+                  >
+                    Copy journal path
+                  </button>
+                  <button
+                    type="button"
+                    className="button button--utility"
+                    disabled={!acpSessionDetail}
+                    onClick={() =>
+                      acpSessionDetail
+                        ? void copyAcpPath("Log path", acpSessionDetail.summary.logPath)
+                        : undefined
+                    }
+                  >
+                    Copy log path
+                  </button>
+                </div>
+              </div>
+              {acpDetailNotice ? (
+                <p className="acp-detail__notice">{acpDetailNotice}</p>
+              ) : null}
 
               {acpSessionDetail ? (
                 <>
@@ -1740,7 +1811,7 @@ function App() {
                   <div className="acp-detail__grid">
                     <section className="acp-detail__panel">
                       <div className="label-row">
-                        <p className="eyebrow">Recent Events</p>
+                        <p className="eyebrow">Status Timeline</p>
                       </div>
                       <div className="acp-event-list">
                         {acpSessionDetail.recentEvents.length > 0 ? (
@@ -1750,9 +1821,12 @@ function App() {
                               className="acp-event-row"
                             >
                               <div className="acp-event-row__meta">
-                                <span className="chip chip--inherit">
-                                  {formatSessionEvent(event.event)}
-                                </span>
+                                <div className="acp-event-row__track">
+                                  <span className="acp-event-row__dot" />
+                                  <span className="chip chip--inherit">
+                                    {formatSessionEvent(event.event)}
+                                  </span>
+                                </div>
                                 <span className="acp-event-row__time">
                                   {formatSessionTimestamp(event.timestampMs)}
                                 </span>

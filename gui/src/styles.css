@@ -861,6 +861,26 @@ pre {
   gap: 12px;
 }
 
+.acp-detail__toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 10px 12px;
+  align-items: center;
+}
+
+.acp-detail__toolbar-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.acp-detail__notice {
+  margin: 0;
+  color: var(--signal);
+  font-size: 0.82rem;
+}
+
 .acp-detail__metrics {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -901,6 +921,21 @@ pre {
   justify-content: space-between;
   gap: 10px;
   align-items: center;
+}
+
+.acp-event-row__track {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.acp-event-row__dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  background: var(--signal);
+  box-shadow: 0 0 12px rgba(25, 223, 164, 0.72);
+  flex: 0 0 auto;
 }
 
 .acp-event-row__time {
@@ -1944,9 +1979,14 @@ pre {
   .droid-panel__toggle,
   .droid-row__controls,
   .acp-adapter-card__head,
-  .acp-event-row__meta {
+  .acp-event-row__meta,
+  .acp-detail__toolbar {
     grid-template-columns: 1fr;
     flex-direction: column;
+  }
+
+  .acp-detail__toolbar-group {
+    width: 100%;
   }
 
   .toggle-chip {
