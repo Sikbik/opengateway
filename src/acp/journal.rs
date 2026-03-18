@@ -114,6 +114,27 @@ pub fn collect_session_summaries(paths: &AppPaths) -> Result<Vec<SessionSummary>
     Ok(sessions)
 }
 
+pub fn highest_session_sequence(paths: &AppPaths) -> Result<u64> {
+    let mut max_sequence = 0;
+    for entry in fs::read_dir(&paths.acp_sessions_dir)
+        .with_context(|| format!("failed to read {}", paths.acp_sessions_dir.display()))?
+    {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
+            continue;
+        }
+
+        let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
+            continue;
+        };
+        if let Some(sequence) = parse_session_sequence(stem) {
+            max_sequence = max_sequence.max(sequence);
+        }
+    }
+    Ok(max_sequence)
+}
+
 pub fn inspect_session(
     paths: &AppPaths,
     session_id: &str,
@@ -192,6 +213,14 @@ fn sanitize_session_id(session_id: &str) -> String {
     }
 }
 
+fn parse_session_sequence(session_id: &str) -> Option<u64> {
+    let digits = session_id.strip_prefix("session-")?;
+    if digits.len() != 6 || !digits.chars().all(|ch| ch.is_ascii_digit()) {
+        return None;
+    }
+    digits.parse().ok()
+}
+
 fn read_recent_session_events(path: &PathBuf, limit: usize) -> Result<Vec<SessionEventRecord>> {
     let contents =
         fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
@@ -245,8 +274,8 @@ fn unix_timestamp_ms() -> u128 {
 #[cfg(test)]
 mod tests {
     use super::{
-        append_journal_event, append_session_log, collect_session_summaries, inspect_session,
-        session_files, tail_lines,
+        append_journal_event, append_session_log, collect_session_summaries,
+        highest_session_sequence, inspect_session, parse_session_sequence, session_files, tail_lines,
     };
     use crate::paths::build_paths;
     use serde_json::json;
@@ -372,5 +401,38 @@ mod tests {
     fn tail_lines_returns_last_non_empty_lines() {
         let lines = tail_lines("a\n\nb\nc\n", 2);
         assert_eq!(lines, vec!["b", "c"]);
+    }
+
+    #[test]
+    fn parse_session_sequence_accepts_only_canonical_ids() {
+        assert_eq!(parse_session_sequence("session-000123"), Some(123));
+        assert_eq!(parse_session_sequence("session-123"), None);
+        assert_eq!(parse_session_sequence("session-000123-extra"), None);
+        assert_eq!(parse_session_sequence("other-000123"), None);
+    }
+
+    #[test]
+    fn highest_session_sequence_ignores_noncanonical_files() {
+        let mut paths = build_paths().expect("paths");
+        let test_root = std::env::temp_dir().join(format!(
+            "opengateway-acp-sequence-test-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ));
+        paths.acp_dir = test_root.clone();
+        paths.acp_sessions_dir = test_root.join("sessions");
+        paths.acp_logs_dir = test_root.join("logs");
+        paths.acp_tmp_dir = test_root.join("tmp");
+        fs::create_dir_all(&paths.acp_sessions_dir).expect("sessions dir");
+        fs::write(paths.acp_sessions_dir.join("session-000009.jsonl"), "").expect("canonical");
+        fs::write(paths.acp_sessions_dir.join("session-000003.jsonl"), "").expect("canonical");
+        fs::write(paths.acp_sessions_dir.join("session-000009-extra.jsonl"), "").expect("noncanonical");
+
+        let sequence = highest_session_sequence(&paths).expect("sequence");
+        assert_eq!(sequence, 9);
+
+        let _ = fs::remove_dir_all(test_root);
     }
 }

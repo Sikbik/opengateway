@@ -93,7 +93,12 @@ where
     let mut state = ServerState {
         initialized: false,
         shutdown_requested: false,
-        supervisor: Arc::new(Mutex::new(SessionSupervisor::new(config.runtime_mode))),
+        supervisor: Arc::new(Mutex::new(match config.paths.as_ref() {
+            Some(paths) => {
+                SessionSupervisor::new_with_persisted_counter(config.runtime_mode, paths)?
+            }
+            None => SessionSupervisor::new(config.runtime_mode),
+        })),
         active_prompt: None,
     };
     let (input_tx, input_rx) = mpsc::channel();

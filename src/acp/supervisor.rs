@@ -1,9 +1,11 @@
 use super::adapters::{codex, AgentKind};
+use super::journal::highest_session_sequence;
 use super::session::{
     CancelParams, ChildRuntimeEnvelope, ChildRuntimeRequest, ChildRuntimeResponse,
     ChildRuntimeStopReason, ChildRuntimeUpdate, InProcessMockSession, NewSessionParams, PromptParams,
 };
 use anyhow::{anyhow, bail, Context, Result};
+use crate::paths::AppPaths;
 use clap::{Args, ValueEnum};
 use std::collections::HashMap;
 use std::env;
@@ -86,9 +88,23 @@ pub enum CancelOutcome {
 
 impl SessionSupervisor {
     pub fn new(runtime_mode: RuntimeMode) -> Self {
+        Self::with_seed(runtime_mode, 0)
+    }
+
+    pub fn new_with_persisted_counter(
+        runtime_mode: RuntimeMode,
+        paths: &AppPaths,
+    ) -> Result<Self> {
+        Ok(Self::with_seed(
+            runtime_mode,
+            highest_session_sequence(paths)?,
+        ))
+    }
+
+    fn with_seed(runtime_mode: RuntimeMode, next_id: u64) -> Self {
         Self {
             runtime_mode,
-            next_id: 0,
+            next_id,
             sessions: HashMap::new(),
         }
     }
@@ -573,11 +589,16 @@ fn apply_allowed_env(command: &mut Command) {
 mod tests {
     use super::{CancelOutcome, RuntimeMode, SessionSupervisor, MAX_ACTIVE_SESSIONS};
     use crate::acp::adapters::AgentKind;
+    use crate::acp::journal::append_journal_event;
     use crate::acp::session::{
         CancelParams, ChildRuntimeStopReason, NewSessionParams, PromptBlock, PromptParams,
     };
-    use std::sync::mpsc;
+    use crate::paths::build_paths;
+    use serde_json::json;
+    use std::fs;
     use std::path::PathBuf;
+    use std::sync::mpsc;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn in_process_supervisor_runs_prompt_and_cancel() {
@@ -667,8 +688,46 @@ mod tests {
                     cwd: PathBuf::from("/tmp"),
                     mcp_servers: vec![],
                 },
-            )
-            .expect_err("claude should not create yet");
+        )
+        .expect_err("claude should not create yet");
         assert!(error.to_string().contains("Claude runtime is not implemented"));
+    }
+
+    #[test]
+    fn persisted_supervisor_continues_session_numbering() {
+        let mut paths = build_paths().expect("paths");
+        let test_root = std::env::temp_dir().join(format!(
+            "opengateway-acp-supervisor-seed-test-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ));
+        paths.acp_dir = test_root.join("acp");
+        paths.acp_sessions_dir = paths.acp_dir.join("sessions");
+        paths.acp_logs_dir = paths.acp_dir.join("logs");
+        paths.acp_tmp_dir = paths.acp_dir.join("tmp");
+        fs::create_dir_all(&paths.acp_sessions_dir).expect("sessions dir");
+        fs::create_dir_all(&paths.acp_logs_dir).expect("logs dir");
+        append_journal_event(&paths, "session-000041", "session.created", json!({"cwd": "/tmp"}))
+            .expect("journal event");
+
+        let mut supervisor = SessionSupervisor::new_with_persisted_counter(
+            RuntimeMode::InProcessMock,
+            &paths,
+        )
+        .expect("seeded supervisor");
+        let created = supervisor
+            .create(
+                AgentKind::Codex,
+                NewSessionParams {
+                    cwd: PathBuf::from("/tmp"),
+                    mcp_servers: vec![],
+                },
+            )
+            .expect("create");
+        assert_eq!(created.session_id, "session-000042");
+
+        let _ = fs::remove_dir_all(test_root);
     }
 }
