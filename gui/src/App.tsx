@@ -10,6 +10,7 @@ import {
 } from "react";
 import { call, runtimeMode } from "./runtime";
 import type {
+  AcpGuiBridge,
   AcpGuiSnapshot,
   AcpGuiSessionDetail,
   AppSnapshot,
@@ -560,6 +561,32 @@ function App() {
     }
   }
 
+  async function runAcpAction(
+    action: string,
+    task: () => Promise<unknown>,
+    onSuccess?: (value: unknown) => void,
+  ): Promise<boolean> {
+    setBusyAction(action);
+    setAcpError(null);
+    let shouldRefresh = false;
+    try {
+      const result = await task();
+      onSuccess?.(result);
+      shouldRefresh = true;
+      return true;
+    } catch (cause) {
+      setAcpError(String(cause));
+      return false;
+    } finally {
+      if (mounted.current) {
+        setBusyAction(null);
+      }
+      if (shouldRefresh) {
+        void refreshAcp();
+      }
+    }
+  }
+
   async function runAction(
     action: string,
     task: () => Promise<unknown>,
@@ -604,6 +631,20 @@ function App() {
     } else {
       await runAction("start", () => call<CommandResult>("start_gateway"));
     }
+  }
+
+  async function handleAcpBridgeToggle(
+    agent: string,
+    running: boolean,
+  ): Promise<void> {
+    await runAcpAction(
+      `acp-bridge:${running ? "stop" : "start"}:${agent}`,
+      () =>
+        call<CommandResult>(
+          running ? "stop_acp_bridge" : "start_acp_bridge",
+          { agent },
+        ),
+    );
   }
 
   async function handleModelSave(droid: DroidRecord) {
@@ -840,8 +881,12 @@ function App() {
         : "Offline";
   const logEntries = logs.slice().reverse().map(parseLogLine);
   const acpAgents = acpSnapshot?.agents ?? [];
+  const acpBridges = acpSnapshot?.bridges ?? [];
   const acpIssues = acpSnapshot?.issues ?? [];
   const acpSessions = acpSnapshot?.sessions ?? [];
+  const acpBridgeByAgent = new Map<string, AcpGuiBridge>(
+    acpBridges.map((bridge) => [bridge.agent, bridge]),
+  );
   const selectedAcpSession =
     acpSessions.find((session) => session.sessionId === selectedAcpSessionId) ?? null;
   const readyAgentCount = acpAgents.filter((agent) => agent.ready).length;
@@ -1622,34 +1667,119 @@ function App() {
 
               <div className="acp-adapters__grid">
                 {acpAgents.length > 0 ? (
-                  acpAgents.map((agent) => (
-                    <article key={agent.kind} className="acp-adapter-card">
-                      <div className="acp-adapter-card__head">
-                        <div>
-                          <p className="eyebrow">{agent.kind}</p>
-                          <h3>{agent.runtimeName}</h3>
+                  acpAgents.map((agent) => {
+                    const bridge = acpBridgeByAgent.get(agent.kind);
+                    const actionKey = `acp-bridge:${bridge?.running ? "stop" : "start"}:${agent.kind}`;
+                    const bridgeBusy = busyAction === actionKey;
+
+                    return (
+                      <article key={agent.kind} className="acp-adapter-card">
+                        <div className="acp-adapter-card__head">
+                          <div>
+                            <p className="eyebrow">{agent.kind}</p>
+                            <h3>{agent.runtimeName}</h3>
+                          </div>
+                          <span
+                            className={`health-pill health-pill--${getAgentTone(agent)}`}
+                          >
+                            {agent.ready ? "Ready" : "Unavailable"}
+                          </span>
                         </div>
-                        <span
-                          className={`health-pill health-pill--${getAgentTone(agent)}`}
-                        >
-                          {agent.ready ? "Ready" : "Unavailable"}
-                        </span>
-                      </div>
-                      <p className="acp-adapter-card__status">
-                        {formatSessionEvent(agent.status)}
-                      </p>
-                      {agent.issue ? (
-                        <p className="acp-adapter-card__issue">{agent.issue}</p>
-                      ) : null}
-                      {agent.guidance.length > 0 ? (
-                        <ul className="acp-guidance-list">
-                          {agent.guidance.map((line) => (
-                            <li key={line}>{line}</li>
-                          ))}
-                        </ul>
-                      ) : null}
-                    </article>
-                  ))
+                        <p className="acp-adapter-card__status">
+                          {formatSessionEvent(agent.status)}
+                        </p>
+                        {agent.issue ? (
+                          <p className="acp-adapter-card__issue">{agent.issue}</p>
+                        ) : null}
+
+                        <div className="acp-adapter-card__bridge">
+                          <div className="acp-adapter-card__bridge-head">
+                            <span className="eyebrow">Bridge</span>
+                            <span
+                              className={
+                                bridge?.running ? "chip chip--custom" : "chip chip--inherit"
+                              }
+                            >
+                              {bridge?.running ? "Serving" : "Idle"}
+                            </span>
+                          </div>
+                          <div className="acp-adapter-card__bridge-grid">
+                            <div className="gateway-stage__datum">
+                              <span>Endpoint</span>
+                              <strong>
+                                {bridge ? compactValue(bridge.endpoint, 16) : "Unavailable"}
+                              </strong>
+                            </div>
+                            <div className="gateway-stage__datum">
+                              <span>PID</span>
+                              <strong>
+                                {bridge?.pid != null ? String(bridge.pid) : "None"}
+                              </strong>
+                            </div>
+                          </div>
+                          <p className="acp-adapter-card__bridge-log">
+                            {bridge?.lastLogLine ?? "No bridge log line recorded yet."}
+                          </p>
+                          <div className="acp-adapter-card__actions">
+                            <button
+                              type="button"
+                              className={
+                                bridge?.running
+                                  ? "button button--utility"
+                                  : "button button--accent"
+                              }
+                              disabled={
+                                busyAction !== null || (!bridge?.running && !agent.ready)
+                              }
+                              onClick={() =>
+                                void handleAcpBridgeToggle(agent.kind, Boolean(bridge?.running))
+                              }
+                            >
+                              {bridgeBusy
+                                ? bridge?.running
+                                  ? "Stopping..."
+                                  : "Starting..."
+                                : bridge?.running
+                                  ? "Stop bridge"
+                                  : "Start bridge"}
+                            </button>
+                            <button
+                              type="button"
+                              className="button button--utility"
+                              disabled={!bridge}
+                              onClick={() =>
+                                bridge
+                                  ? void copyAcpPath("Bridge endpoint", bridge.endpoint)
+                                  : undefined
+                              }
+                            >
+                              Copy endpoint
+                            </button>
+                            <button
+                              type="button"
+                              className="button button--utility"
+                              disabled={!bridge}
+                              onClick={() =>
+                                bridge
+                                  ? void copyAcpPath("Bridge log path", bridge.logPath)
+                                  : undefined
+                              }
+                            >
+                              Copy log path
+                            </button>
+                          </div>
+                        </div>
+
+                        {agent.guidance.length > 0 ? (
+                          <ul className="acp-guidance-list">
+                            {agent.guidance.map((line) => (
+                              <li key={line}>{line}</li>
+                            ))}
+                          </ul>
+                        ) : null}
+                      </article>
+                    );
+                  })
                 ) : (
                   <div className="empty-state">
                     No ACP adapters have reported readiness yet.

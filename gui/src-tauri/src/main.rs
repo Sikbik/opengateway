@@ -19,6 +19,8 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             control::load_snapshot,
             control::load_acp_snapshot,
+            control::start_acp_bridge,
+            control::stop_acp_bridge,
             control::load_acp_session_detail,
             control::tail_logs,
             control::start_gateway,

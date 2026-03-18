@@ -1,4 +1,5 @@
 use super::adapters::{claude, codex, supported_agents, AgentKind};
+use super::bridge::collect_bridge_statuses;
 use super::capabilities::{planned_capabilities, PlannedCapabilities};
 use super::journal::{
     collect_metrics_summary, collect_recent_session_issues, collect_session_summaries,
@@ -25,6 +26,7 @@ pub struct AcpSnapshot {
     pub metrics: AcpMetricsSummary,
     pub recorded_session_count: usize,
     pub agents: Vec<AcpAgentSnapshot>,
+    pub bridges: Vec<AcpBridgeSnapshot>,
     pub issues: Vec<AcpIssueSnapshot>,
     pub sessions: Vec<SessionSummary>,
 }
@@ -81,6 +83,20 @@ pub struct AcpAgentSnapshot {
     pub api_provider: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub subscription_type: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AcpBridgeSnapshot {
+    pub agent: String,
+    pub running: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pid: Option<i32>,
+    pub host: String,
+    pub port: u16,
+    pub endpoint: String,
+    pub log_path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_log_line: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -219,6 +235,7 @@ pub fn build_snapshot(paths: &AppPaths) -> Result<AcpSnapshot> {
         metrics,
         recorded_session_count: sessions.len(),
         agents,
+        bridges: collect_bridge_statuses(paths),
         issues,
         sessions,
     })
@@ -305,6 +322,7 @@ mod tests {
         assert_eq!(snapshot.sessions.len(), 1);
         assert_eq!(snapshot.agents[0].kind, "codex");
         assert_eq!(snapshot.agents[1].kind, "claude");
+        assert_eq!(snapshot.bridges.len(), 2);
 
         let _ = fs::remove_dir_all(test_root);
     }

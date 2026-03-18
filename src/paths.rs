@@ -20,6 +20,7 @@ pub struct AppPaths {
     pub acp_sessions_dir: PathBuf,
     pub acp_logs_dir: PathBuf,
     pub acp_tmp_dir: PathBuf,
+    pub acp_bridges_dir: PathBuf,
 }
 
 #[derive(Debug, Clone)]
@@ -58,6 +59,7 @@ pub fn build_paths() -> Result<AppPaths> {
         acp_sessions_dir: acp_dir.join("sessions"),
         acp_logs_dir: acp_dir.join("logs"),
         acp_tmp_dir: acp_dir.join("tmp"),
+        acp_bridges_dir: acp_dir.join("bridges"),
         acp_dir,
     })
 }
@@ -89,6 +91,12 @@ impl AppPaths {
         })?;
         fs::create_dir_all(&self.acp_tmp_dir).with_context(|| {
             format!("failed to create ACP tmp dir {}", self.acp_tmp_dir.display())
+        })?;
+        fs::create_dir_all(&self.acp_bridges_dir).with_context(|| {
+            format!(
+                "failed to create ACP bridges dir {}",
+                self.acp_bridges_dir.display()
+            )
         })?;
         Ok(())
     }

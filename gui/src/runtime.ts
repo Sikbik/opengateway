@@ -40,6 +40,16 @@ export async function call<T>(
       return fetchBridge<T>("/snapshot");
     case "load_acp_snapshot":
       return fetchBridge<T>("/acp-snapshot");
+    case "start_acp_bridge":
+      return fetchBridge<T>("/acp-bridge/start", {
+        method: "POST",
+        body: JSON.stringify(args ?? {}),
+      });
+    case "stop_acp_bridge":
+      return fetchBridge<T>("/acp-bridge/stop", {
+        method: "POST",
+        body: JSON.stringify(args ?? {}),
+      });
     case "load_acp_session_detail": {
       const params = new URLSearchParams({
         sessionId: String(args?.sessionId ?? ""),

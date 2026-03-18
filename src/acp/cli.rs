@@ -1,4 +1,5 @@
 use super::adapters::AgentKind;
+use super::bridge::{command_bridge, AcpBridgeArgs};
 use super::capabilities::planned_capabilities;
 use super::doctor;
 use super::supervisor::RuntimeMode;
@@ -21,6 +22,7 @@ pub struct AcpArgs {
 #[derive(Debug, Subcommand)]
 pub enum AcpCommand {
     Serve(AcpServeArgs),
+    Bridge(AcpBridgeArgs),
     Doctor(AcpDoctorArgs),
     Sessions(AcpSessionsArgs),
     Inspect(AcpInspectArgs),
@@ -74,6 +76,7 @@ pub struct AcpExportArgs {
 pub fn command_acp(args: AcpArgs) -> Result<()> {
     match args.command {
         AcpCommand::Serve(args) => command_serve(args),
+        AcpCommand::Bridge(args) => command_bridge(args),
         AcpCommand::Doctor(_) => command_doctor(),
         AcpCommand::Sessions(_) => command_sessions(),
         AcpCommand::Inspect(args) => command_inspect(args),

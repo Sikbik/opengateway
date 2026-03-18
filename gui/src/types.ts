@@ -81,6 +81,7 @@ export interface AcpGuiSnapshot {
   processModel: string;
   metrics: AcpGuiMetrics;
   agents: AcpGuiAgent[];
+  bridges: AcpGuiBridge[];
   issues: AcpGuiIssue[];
   sessions: AcpGuiSession[];
 }
@@ -99,6 +100,17 @@ export interface AcpGuiAgent {
   ready: boolean;
   issue: string | null;
   guidance: string[];
+}
+
+export interface AcpGuiBridge {
+  agent: string;
+  running: boolean;
+  pid: number | null;
+  host: string;
+  port: number;
+  endpoint: string;
+  logPath: string;
+  lastLogLine: string | null;
 }
 
 export interface AcpGuiSession {

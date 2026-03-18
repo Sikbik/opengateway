@@ -94,6 +94,8 @@ enum Commands {
     AcpCodexRuntime(acp::CodexRuntimeArgs),
     #[command(name = "acp-claude-runtime", hide = true)]
     AcpClaudeRuntime(acp::ClaudeRuntimeArgs),
+    #[command(name = "acp-bridge-run", hide = true)]
+    AcpBridgeRun(acp::AcpBridgeRunArgs),
     #[command(name = "acp-mock-runtime", hide = true)]
     AcpMockRuntime(acp::MockRuntimeArgs),
     #[command(alias = "gui")]
@@ -112,6 +114,10 @@ enum Commands {
     GuiSnapshot,
     #[command(name = "gui-acp-snapshot", hide = true)]
     GuiAcpSnapshot,
+    #[command(name = "gui-acp-bridge-start", hide = true)]
+    GuiAcpBridgeStart(GuiAcpBridgeArgs),
+    #[command(name = "gui-acp-bridge-stop", hide = true)]
+    GuiAcpBridgeStop(GuiAcpBridgeArgs),
     #[command(name = "gui-acp-inspect", hide = true)]
     GuiAcpInspect(GuiAcpInspectArgs),
     #[command(name = "gui-logs", hide = true)]
@@ -398,6 +404,12 @@ struct GuiAcpInspectArgs {
 }
 
 #[derive(Debug, clap::Args)]
+struct GuiAcpBridgeArgs {
+    #[arg(long, value_enum)]
+    agent: acp::adapters::AgentKind,
+}
+
+#[derive(Debug, clap::Args)]
 struct GuiSetDroidModelArgs {
     #[arg(long)]
     path: PathBuf,
@@ -457,6 +469,7 @@ fn run_cli() -> Result<()> {
         Commands::Acp(args) => acp::cli::command_acp(args),
         Commands::AcpCodexRuntime(args) => acp::command_codex_runtime(args),
         Commands::AcpClaudeRuntime(args) => acp::command_claude_runtime(args),
+        Commands::AcpBridgeRun(args) => acp::command_bridge_run(args),
         Commands::AcpMockRuntime(args) => acp::command_mock_runtime(args),
         Commands::Control(args) => command_control(args),
         Commands::Start(args) => command_start(args),
@@ -471,6 +484,24 @@ fn run_cli() -> Result<()> {
         Commands::Doctor(args) => command_doctor(args),
         Commands::GuiSnapshot => gui_api::print_snapshot_json(),
         Commands::GuiAcpSnapshot => gui_api::print_acp_snapshot_json(),
+        Commands::GuiAcpBridgeStart(args) => {
+            gui_api::print_command_result_json_owned(vec![
+                "acp".to_string(),
+                "bridge".to_string(),
+                "start".to_string(),
+                "--agent".to_string(),
+                args.agent.as_str().to_string(),
+            ])
+        }
+        Commands::GuiAcpBridgeStop(args) => {
+            gui_api::print_command_result_json_owned(vec![
+                "acp".to_string(),
+                "bridge".to_string(),
+                "stop".to_string(),
+                "--agent".to_string(),
+                args.agent.as_str().to_string(),
+            ])
+        }
         Commands::GuiAcpInspect(args) => {
             gui_api::print_acp_session_detail_json(&args.session_id, args.limit)
         }
@@ -854,7 +885,7 @@ fn command_start(args: StartArgs) -> Result<()> {
         command.arg("--no-auto-install");
     }
 
-    let mut child = spawn_background_gateway(command, &paths.log_file)?;
+    let mut child = spawn_background_command(command, &paths.log_file)?;
 
     let timeout = args.timeout.max(0.1);
     let deadline = Instant::now() + Duration::from_secs_f64(timeout);
@@ -911,7 +942,7 @@ fn command_start(args: StartArgs) -> Result<()> {
     Err(anyhow!("startup failed"))
 }
 
-fn resolve_background_executable(paths: &AppPaths) -> Result<PathBuf> {
+pub(crate) fn resolve_background_executable(paths: &AppPaths) -> Result<PathBuf> {
     let current_exe = std::env::current_exe().context("failed to resolve executable path")?;
 
     #[cfg(windows)]
@@ -936,7 +967,10 @@ fn resolve_background_executable(paths: &AppPaths) -> Result<PathBuf> {
 }
 
 #[cfg(windows)]
-fn spawn_background_gateway(mut command: Command, log_file: &Path) -> Result<Option<Child>> {
+pub(crate) fn spawn_background_command(
+    command: Command,
+    log_file: &Path,
+) -> Result<Option<Child>> {
     let log_handle = fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -959,31 +993,41 @@ fn spawn_background_gateway(mut command: Command, log_file: &Path) -> Result<Opt
 }
 
 #[cfg(unix)]
-fn spawn_background_gateway(command: Command, log_file: &Path) -> Result<Option<Child>> {
+pub(crate) fn spawn_background_command(
+    command: Command,
+    log_file: &Path,
+) -> Result<Option<Child>> {
+    let log_handle = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_file)
+        .with_context(|| format!("failed to open log file {}", log_file.display()))?;
+    let err_handle = log_handle
+        .try_clone()
+        .context("failed to clone log handle")?;
+
     let program = command.get_program().to_owned();
     let args: Vec<_> = command.get_args().map(|value| value.to_owned()).collect();
 
-    let status = Command::new("bash")
-        .arg("-lc")
-        .arg(r#"log_file="$1"; shift; nohup "$@" </dev/null >>"$log_file" 2>&1 &"#)
-        .arg("opengateway-start")
-        .arg(log_file)
+    let mut detached = Command::new("setsid");
+    detached
         .arg(program)
         .args(args)
-        .status()
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(log_handle))
+        .stderr(Stdio::from(err_handle));
+
+    let child = detached
+        .spawn()
         .context("failed to start detached background process")?;
-
-    if !status.success() {
-        return Err(anyhow!(
-            "failed to start detached background process (status {status})"
-        ));
-    }
-
-    Ok(None)
+    Ok(Some(child))
 }
 
 #[cfg(not(any(unix, windows)))]
-fn spawn_background_gateway(mut command: Command, log_file: &Path) -> Result<Option<Child>> {
+pub(crate) fn spawn_background_command(
+    mut command: Command,
+    log_file: &Path,
+) -> Result<Option<Child>> {
     let log_handle = fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -1912,7 +1956,7 @@ fn read_json_with_backup(path: &Path) -> Result<(Value, Option<PathBuf>)> {
     Ok((existing, backup))
 }
 
-fn expand_user_path(path: &Path) -> PathBuf {
+pub(crate) fn expand_user_path(path: &Path) -> PathBuf {
     let raw = path.to_string_lossy();
     if raw == "~" {
         return paths::home_dir().unwrap_or_else(|_| path.to_path_buf());
@@ -1997,13 +2041,13 @@ fn generate_secret(byte_len: usize) -> String {
     URL_SAFE_NO_PAD.encode(bytes)
 }
 
-fn read_pid(path: &Path) -> Option<i32> {
+pub(crate) fn read_pid(path: &Path) -> Option<i32> {
     fs::read_to_string(path)
         .ok()
         .and_then(|raw| raw.trim().parse::<i32>().ok())
 }
 
-fn write_pid(path: &Path, pid: i32) -> Result<()> {
+pub(crate) fn write_pid(path: &Path, pid: i32) -> Result<()> {
     let tmp_path = path.with_extension("pid.tmp");
     fs::write(&tmp_path, format!("{pid}\n"))
         .with_context(|| format!("failed to write pid temp file {}", tmp_path.display()))?;
@@ -2012,11 +2056,11 @@ fn write_pid(path: &Path, pid: i32) -> Result<()> {
     Ok(())
 }
 
-fn remove_pid(path: &Path) {
+pub(crate) fn remove_pid(path: &Path) {
     let _ = fs::remove_file(path);
 }
 
-fn clear_stale_pid_file(path: &Path) {
+pub(crate) fn clear_stale_pid_file(path: &Path) {
     if let Some(pid) = read_pid(path) {
         if !pid_running(pid) {
             remove_pid(path);
@@ -2024,7 +2068,7 @@ fn clear_stale_pid_file(path: &Path) {
     }
 }
 
-fn pid_running(pid: i32) -> bool {
+pub(crate) fn pid_running(pid: i32) -> bool {
     if pid <= 0 {
         return false;
     }
@@ -2067,7 +2111,7 @@ fn pid_running(pid: i32) -> bool {
     }
 }
 
-fn send_signal(pid: i32, signal: &str) -> Result<()> {
+pub(crate) fn send_signal(pid: i32, signal: &str) -> Result<()> {
     #[cfg(windows)]
     {
         let mut command = windows_system_command("taskkill");
@@ -2110,7 +2154,7 @@ fn send_signal(pid: i32, signal: &str) -> Result<()> {
     }
 }
 
-fn tail_file(path: &Path, lines: usize) -> Result<Vec<String>> {
+pub(crate) fn tail_file(path: &Path, lines: usize) -> Result<Vec<String>> {
     let file = fs::File::open(path)
         .with_context(|| format!("failed to open log file {}", path.display()))?;
     let reader = BufReader::new(file);

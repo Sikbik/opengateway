@@ -36,6 +36,7 @@ pub struct AcpGuiSnapshot {
     process_model: String,
     metrics: AcpGuiMetrics,
     agents: Vec<AcpGuiAgent>,
+    bridges: Vec<AcpGuiBridge>,
     issues: Vec<AcpGuiIssue>,
     sessions: Vec<AcpGuiSession>,
 }
@@ -111,6 +112,19 @@ pub struct AcpGuiAgent {
     ready: bool,
     issue: Option<String>,
     guidance: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AcpGuiBridge {
+    agent: String,
+    running: bool,
+    pid: Option<i32>,
+    host: String,
+    port: u16,
+    endpoint: String,
+    log_path: String,
+    last_log_line: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -255,6 +269,15 @@ pub fn print_command_result_json(command: &[&str]) -> Result<()> {
     Ok(())
 }
 
+pub fn print_command_result_json_owned(command: Vec<String>) -> Result<()> {
+    let result = run_self_command_owned(command)?;
+    println!(
+        "{}",
+        serde_json::to_string(&result).context("failed to encode command result")?
+    );
+    Ok(())
+}
+
 pub fn print_droid_model_update_json(path: &Path, model: &str) -> Result<()> {
     let record = set_droid_model(path, model)?;
     println!(
@@ -313,6 +336,20 @@ fn load_acp_snapshot() -> Result<AcpGuiSnapshot> {
                 ready: agent.ready,
                 issue: agent.issue,
                 guidance: agent.guidance,
+            })
+            .collect(),
+        bridges: snapshot
+            .bridges
+            .into_iter()
+            .map(|bridge| AcpGuiBridge {
+                agent: bridge.agent,
+                running: bridge.running,
+                pid: bridge.pid,
+                host: bridge.host,
+                port: bridge.port,
+                endpoint: bridge.endpoint,
+                log_path: bridge.log_path,
+                last_log_line: bridge.last_log_line,
             })
             .collect(),
         issues: snapshot
@@ -907,6 +944,10 @@ fn detect_wsl() -> bool {
 }
 
 fn run_self_command(args: &[&str]) -> Result<CommandResult> {
+    run_self_command_owned(args.iter().map(|value| (*value).to_string()).collect())
+}
+
+fn run_self_command_owned(args: Vec<String>) -> Result<CommandResult> {
     let current_exe = env::current_exe().context("failed to resolve current executable")?;
     let output = Command::new(current_exe)
         .args(args)

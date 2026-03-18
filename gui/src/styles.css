@@ -833,6 +833,42 @@ pre {
   font-size: 0.82rem;
 }
 
+.acp-adapter-card__bridge {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border-radius: 14px;
+  border: 1px solid rgba(136, 171, 255, 0.12);
+  background: rgba(4, 10, 22, 0.56);
+}
+
+.acp-adapter-card__bridge-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+
+.acp-adapter-card__bridge-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.acp-adapter-card__bridge-log {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.78rem;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.acp-adapter-card__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 .acp-guidance-list {
   margin: 0;
   padding-left: 1.1rem;
@@ -2049,6 +2085,10 @@ pre {
   .acp-detail__toolbar {
     grid-template-columns: 1fr;
     flex-direction: column;
+  }
+
+  .acp-adapter-card__bridge-grid {
+    grid-template-columns: 1fr;
   }
 
   .acp-detail__toolbar-group {

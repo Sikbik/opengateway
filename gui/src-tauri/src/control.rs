@@ -57,6 +57,32 @@ pub async fn load_acp_snapshot(app: AppHandle) -> Result<Value, String> {
 }
 
 #[tauri::command]
+pub async fn start_acp_bridge(app: AppHandle, agent: String) -> Result<CommandResult, String> {
+    run_json_command_owned(
+        &app,
+        vec![
+            "gui-acp-bridge-start".to_string(),
+            "--agent".to_string(),
+            agent,
+        ],
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn stop_acp_bridge(app: AppHandle, agent: String) -> Result<CommandResult, String> {
+    run_json_command_owned(
+        &app,
+        vec![
+            "gui-acp-bridge-stop".to_string(),
+            "--agent".to_string(),
+            agent,
+        ],
+    )
+    .await
+}
+
+#[tauri::command]
 pub async fn load_acp_session_detail(
     app: AppHandle,
     session_id: String,

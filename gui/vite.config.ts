@@ -65,6 +65,40 @@ function factoryControlBridge(): Plugin {
             return;
           }
 
+          if (req.method === "POST" && url.pathname === "/acp-bridge/start") {
+            const parsed = JSON.parse(body || "{}") as { agent?: string };
+            if (!parsed.agent) {
+              res.statusCode = 400;
+              res.end("agent is required");
+              return;
+            }
+            writeJson(
+              await execGateway([
+                "gui-acp-bridge-start",
+                "--agent",
+                parsed.agent,
+              ]),
+            );
+            return;
+          }
+
+          if (req.method === "POST" && url.pathname === "/acp-bridge/stop") {
+            const parsed = JSON.parse(body || "{}") as { agent?: string };
+            if (!parsed.agent) {
+              res.statusCode = 400;
+              res.end("agent is required");
+              return;
+            }
+            writeJson(
+              await execGateway([
+                "gui-acp-bridge-stop",
+                "--agent",
+                parsed.agent,
+              ]),
+            );
+            return;
+          }
+
           if (req.method === "GET" && url.pathname === "/acp-inspect") {
             const sessionId = url.searchParams.get("sessionId")?.trim();
             if (!sessionId) {
