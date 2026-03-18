@@ -127,6 +127,10 @@ fn command_sessions() -> Result<()> {
             session.cwd.as_deref().unwrap_or("unknown")
         );
         println!(
+            "  model: {}",
+            session.selected_model.as_deref().unwrap_or("default")
+        );
+        println!(
             "  last-event: {}",
             session.last_event.as_deref().unwrap_or("unknown")
         );
@@ -156,6 +160,14 @@ fn command_inspect(args: AcpInspectArgs) -> Result<()> {
     println!(
         "cwd: {}",
         detail.summary.cwd.as_deref().unwrap_or("unknown")
+    );
+    println!(
+        "model: {}",
+        detail
+            .summary
+            .selected_model
+            .as_deref()
+            .unwrap_or("default")
     );
     println!(
         "last-event: {}",

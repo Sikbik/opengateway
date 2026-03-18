@@ -104,6 +104,7 @@ export interface AcpGuiAgent {
 export interface AcpGuiSession {
   sessionId: string;
   agentKind: string | null;
+  selectedModel: string | null;
   state: string;
   promptCount: number;
   cwd: string | null;

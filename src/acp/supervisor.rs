@@ -69,6 +69,7 @@ pub struct SessionCreated {
     pub session_id: String,
     pub cwd: PathBuf,
     pub mcp_server_count: usize,
+    pub model: Option<String>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -122,6 +123,7 @@ impl SessionSupervisor {
             session_id: session_id.clone(),
             cwd: params.cwd.clone(),
             mcp_server_count: params.mcp_servers.len(),
+            model: params.model.clone(),
         };
 
         let handle = match self.runtime_mode {
@@ -273,6 +275,11 @@ impl ProcessSession {
                         .arg(&params.cwd)
                         .arg("--mcp-server-count")
                         .arg(params.mcp_servers.len().to_string());
+                    if let Some(model) = params.model.as_deref() {
+                        if !model.trim().is_empty() {
+                            command.arg("--model").arg(model);
+                        }
+                    }
                 }
                 AgentKind::Claude => bail!("ACP Claude runtime is not implemented yet"),
             },
@@ -444,6 +451,7 @@ pub fn command_mock_runtime(args: MockRuntimeArgs) -> Result<()> {
         agent: args.agent,
         cwd: args.cwd,
         mcp_server_count: args.mcp_server_count,
+        model: None,
         prompt_count: 0,
     };
     let stdin = std::io::stdin();
@@ -609,6 +617,7 @@ mod tests {
                 NewSessionParams {
                     cwd: PathBuf::from("/tmp"),
                     mcp_servers: vec![],
+                    model: Some("gpt-5.4".to_string()),
                 },
             )
             .expect("create");
@@ -630,6 +639,7 @@ mod tests {
             .expect("prompt");
         assert_eq!(prompt.prompt_count, 1);
         assert!(prompt.reply_text.contains("hello"));
+        assert_eq!(created.model.as_deref(), Some("gpt-5.4"));
         assert_eq!(prompt.stop_reason, ChildRuntimeStopReason::EndTurn);
 
         let cancelled = supervisor
@@ -661,6 +671,7 @@ mod tests {
                     NewSessionParams {
                         cwd: PathBuf::from("/tmp"),
                         mcp_servers: vec![],
+                        model: None,
                     },
                 )
                 .expect("create within cap");
@@ -672,6 +683,7 @@ mod tests {
                 NewSessionParams {
                     cwd: PathBuf::from("/tmp"),
                     mcp_servers: vec![],
+                    model: None,
                 },
             )
             .expect_err("cap should reject");
@@ -687,6 +699,7 @@ mod tests {
                 NewSessionParams {
                     cwd: PathBuf::from("/tmp"),
                     mcp_servers: vec![],
+                    model: None,
                 },
         )
         .expect_err("claude should not create yet");
@@ -723,6 +736,7 @@ mod tests {
                 NewSessionParams {
                     cwd: PathBuf::from("/tmp"),
                     mcp_servers: vec![],
+                    model: None,
                 },
             )
             .expect("create");

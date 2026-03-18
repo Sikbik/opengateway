@@ -19,6 +19,7 @@ pub struct SessionFiles {
 pub struct SessionSummary {
     pub session_id: String,
     pub agent_kind: Option<String>,
+    pub selected_model: Option<String>,
     pub prompt_count: usize,
     pub cwd: Option<String>,
     pub state: String,
@@ -94,6 +95,7 @@ pub fn collect_session_summaries(paths: &AppPaths) -> Result<Vec<SessionSummary>
         let mut summary = SessionSummary {
             session_id: stem.to_string(),
             agent_kind: None,
+            selected_model: None,
             prompt_count: 0,
             cwd: None,
             state: "unknown".to_string(),
@@ -132,6 +134,13 @@ pub fn collect_session_summaries(paths: &AppPaths) -> Result<Vec<SessionSummary>
                 summary.agent_kind = value
                     .get("data")
                     .and_then(|data| data.get("agent"))
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
+            }
+            if summary.selected_model.is_none() {
+                summary.selected_model = value
+                    .get("data")
+                    .and_then(|data| data.get("model"))
                     .and_then(Value::as_str)
                     .map(str::to_string);
             }
@@ -455,7 +464,7 @@ mod tests {
             &paths,
             "session-1",
             "session.created",
-            json!({"agent": "codex", "cwd": "/tmp"}),
+            json!({"agent": "codex", "cwd": "/tmp", "model": "gpt-5.4"}),
         )
             .expect("journal event");
         append_session_log(&paths, "session-1", "session created").expect("session log");
@@ -491,7 +500,7 @@ mod tests {
             &paths,
             "session-1",
             "session.created",
-            json!({"agent": "codex", "cwd": "/tmp"}),
+            json!({"agent": "codex", "cwd": "/tmp", "model": "gpt-5.4"}),
         )
             .expect("journal event");
         append_journal_event(
@@ -506,6 +515,7 @@ mod tests {
         assert_eq!(summaries.len(), 1);
         assert_eq!(summaries[0].session_id, "session-1");
         assert_eq!(summaries[0].agent_kind.as_deref(), Some("codex"));
+        assert_eq!(summaries[0].selected_model.as_deref(), Some("gpt-5.4"));
         assert_eq!(summaries[0].prompt_count, 1);
         assert_eq!(summaries[0].cwd.as_deref(), Some("/tmp"));
         assert_eq!(summaries[0].state, "running");
@@ -532,7 +542,12 @@ mod tests {
         fs::create_dir_all(&paths.acp_sessions_dir).expect("sessions dir");
         fs::create_dir_all(&paths.acp_logs_dir).expect("logs dir");
 
-        append_journal_event(&paths, "session-1", "session.created", json!({"cwd": "/tmp"}))
+        append_journal_event(
+            &paths,
+            "session-1",
+            "session.created",
+            json!({"cwd": "/tmp", "model": "gpt-5.4-mini"}),
+        )
             .expect("journal event");
         append_journal_event(&paths, "session-1", "prompt.completed", json!({"promptBlocks": 1}))
             .expect("prompt event");
@@ -543,6 +558,7 @@ mod tests {
             .expect("detail")
             .expect("session present");
         assert_eq!(detail.summary.session_id, "session-1");
+        assert_eq!(detail.summary.selected_model.as_deref(), Some("gpt-5.4-mini"));
         assert_eq!(detail.metrics.sessions_created, 1);
         assert_eq!(detail.metrics.prompts_completed, 1);
         assert_eq!(detail.recent_events.len(), 1);

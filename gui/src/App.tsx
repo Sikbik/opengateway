@@ -1753,6 +1753,11 @@ function App() {
                           <span className="chip chip--custom">
                             {session.promptCount} prompts
                           </span>
+                          {session.selectedModel ? (
+                            <span className="chip chip--inherit">
+                              {formatModel(session.selectedModel)}
+                            </span>
+                          ) : null}
                           <span className="chip chip--inherit">
                             {formatSessionEvent(session.lastEvent)}
                           </span>
@@ -1881,6 +1886,12 @@ function App() {
                       <span>Working dir</span>
                       <strong>
                         {acpSessionDetail.summary.cwd ?? "No working directory recorded"}
+                      </strong>
+                    </div>
+                    <div className="gateway-stage__datum">
+                      <span>Model</span>
+                      <strong>
+                        {formatModel(acpSessionDetail.summary.selectedModel, "Default")}
                       </strong>
                     </div>
                   </div>

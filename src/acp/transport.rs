@@ -345,7 +345,12 @@ where
             };
             log_line(
                 log,
-                &format!("acp session created: {} ({})", session.session_id, session.cwd.display()),
+                &format!(
+                    "acp session created: {} ({}, model={})",
+                    session.session_id,
+                    session.cwd.display(),
+                    session.model.as_deref().unwrap_or("default")
+                ),
             )?;
             record_session_event(
                 config,
@@ -356,13 +361,18 @@ where
                     "agent": config.agent.as_str(),
                     "cwd": session.cwd.display().to_string(),
                     "mcpServers": session.mcp_server_count,
+                    "model": session.model,
                 }),
             )?;
             record_session_log(
                 config,
                 log,
                 &session.session_id,
-                &format!("created session in {}", session.cwd.display()),
+                &format!(
+                    "created session in {} (model={})",
+                    session.cwd.display(),
+                    session.model.as_deref().unwrap_or("default")
+                ),
             )?;
             write_message(
                 output,

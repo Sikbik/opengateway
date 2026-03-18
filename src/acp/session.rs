@@ -8,6 +8,8 @@ use std::path::PathBuf;
 pub struct NewSessionParams {
     pub cwd: PathBuf,
     pub mcp_servers: Vec<Value>,
+    #[serde(default)]
+    pub model: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -96,6 +98,7 @@ pub struct InProcessMockSession {
     pub agent: AgentKind,
     pub cwd: PathBuf,
     pub mcp_server_count: usize,
+    pub model: Option<String>,
     pub prompt_count: u64,
 }
 
@@ -106,6 +109,7 @@ impl InProcessMockSession {
             agent,
             cwd: params.cwd,
             mcp_server_count: params.mcp_servers.len(),
+            model: params.model,
             prompt_count: 0,
         }
     }
@@ -125,22 +129,35 @@ impl InProcessMockSession {
             .count();
 
         if !text_blocks.is_empty() {
+            let prefix = match self.model.as_deref() {
+                Some(model) if !model.trim().is_empty() => format!(
+                    "Mock {} session {} in {} with model {} received: ",
+                    self.agent.as_str(),
+                    self.id,
+                    self.cwd.display(),
+                    model
+                ),
+                _ => format!(
+                    "Mock {} session {} in {} received: ",
+                    self.agent.as_str(),
+                    self.id,
+                    self.cwd.display()
+                ),
+            };
             return format!(
-                "Mock {} session {} in {} received: {}",
-                self.agent.as_str(),
-                self.id,
-                self.cwd.display(),
+                "{prefix}{}",
                 text_blocks.join(" ")
             );
         }
 
         format!(
-            "Mock {} session {} received {} prompt block(s) with {} resource link(s); MCP servers attached: {}.",
+            "Mock {} session {} received {} prompt block(s) with {} resource link(s); MCP servers attached: {}; model: {}.",
             self.agent.as_str(),
             self.id,
             prompt.prompt.len(),
             resource_links,
-            self.mcp_server_count
+            self.mcp_server_count,
+            self.model.as_deref().unwrap_or("default")
         )
     }
 }
@@ -168,6 +185,7 @@ mod tests {
             agent: AgentKind::Codex,
             cwd: PathBuf::from("/workspace"),
             mcp_server_count: 1,
+            model: Some("gpt-5.4".to_string()),
             prompt_count: 0,
         };
         let reply = session.build_mock_reply(&PromptParams {
@@ -196,8 +214,10 @@ mod tests {
             NewSessionParams {
                 cwd: PathBuf::from("/tmp"),
                 mcp_servers: vec![serde_json::json!({"name": "demo"})],
+                model: Some("gpt-5.4-mini".to_string()),
             },
         );
         assert_eq!(session.mcp_server_count, 1);
+        assert_eq!(session.model.as_deref(), Some("gpt-5.4-mini"));
     }
 }

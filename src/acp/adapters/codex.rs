@@ -48,12 +48,15 @@ pub struct CodexRuntimeArgs {
     pub cwd: PathBuf,
     #[arg(long, default_value_t = 0)]
     pub mcp_server_count: usize,
+    #[arg(long)]
+    pub model: Option<String>,
 }
 
 #[derive(Debug)]
 struct CodexRuntimeSession {
     cwd: PathBuf,
     mcp_server_count: usize,
+    model: Option<String>,
     prompt_count: u64,
 }
 
@@ -84,6 +87,7 @@ pub fn command_codex_runtime(args: CodexRuntimeArgs) -> Result<()> {
     let mut session = CodexRuntimeSession {
         cwd: args.cwd,
         mcp_server_count: args.mcp_server_count,
+        model: args.model,
         prompt_count: 0,
     };
     let (input_tx, input_rx) = mpsc::channel();
@@ -121,6 +125,7 @@ pub fn command_codex_runtime(args: CodexRuntimeArgs) -> Result<()> {
                         &session.cwd,
                         &request.prompt,
                         session.mcp_server_count,
+                        session.model.as_deref(),
                     )?);
                 }
                 "cancel_prompt" => {
@@ -482,7 +487,12 @@ fn windows_command_candidates(directory: &Path, command: &str) -> Vec<PathBuf> {
 }
 
 impl CodexPromptExecution {
-    fn spawn(cwd: &Path, prompt: &[PromptBlock], mcp_server_count: usize) -> Result<Self> {
+    fn spawn(
+        cwd: &Path,
+        prompt: &[PromptBlock],
+        mcp_server_count: usize,
+        model: Option<&str>,
+    ) -> Result<Self> {
         let prompt_text = build_codex_prompt(prompt, mcp_server_count)?;
         let mut command = Command::new("codex");
         command
@@ -493,6 +503,11 @@ impl CodexPromptExecution {
             .arg("-C")
             .arg(cwd)
             .arg("-");
+        if let Some(model) = model {
+            if !model.trim().is_empty() {
+                command.arg("-m").arg(model);
+            }
+        }
         #[cfg(windows)]
         command.creation_flags(CREATE_NO_WINDOW);
         command

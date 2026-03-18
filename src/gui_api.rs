@@ -115,6 +115,7 @@ pub struct AcpGuiAgent {
 pub struct AcpGuiSession {
     session_id: String,
     agent_kind: Option<String>,
+    selected_model: Option<String>,
     state: String,
     prompt_count: usize,
     cwd: Option<String>,
@@ -310,6 +311,7 @@ fn load_acp_snapshot() -> Result<AcpGuiSnapshot> {
             .map(|session| AcpGuiSession {
                 session_id: session.session_id,
                 agent_kind: session.agent_kind,
+                selected_model: session.selected_model,
                 state: session.state,
                 prompt_count: session.prompt_count,
                 cwd: session.cwd,
@@ -333,6 +335,7 @@ fn load_acp_session_detail(session_id: &str, limit: usize) -> Result<AcpGuiSessi
         summary: AcpGuiSession {
             session_id: detail.summary.session_id,
             agent_kind: detail.summary.agent_kind,
+            selected_model: detail.summary.selected_model,
             state: detail.summary.state,
             prompt_count: detail.summary.prompt_count,
             cwd: detail.summary.cwd,
