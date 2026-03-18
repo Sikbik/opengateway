@@ -73,3 +73,39 @@ export interface CommandResult {
   success: boolean;
   output: string;
 }
+
+export interface AcpGuiSnapshot {
+  experimental: boolean;
+  command: string;
+  transport: string;
+  processModel: string;
+  metrics: AcpGuiMetrics;
+  agents: AcpGuiAgent[];
+  sessions: AcpGuiSession[];
+}
+
+export interface AcpGuiMetrics {
+  sessionsCreated: number;
+  promptsCompleted: number;
+  promptsCancelled: number;
+  runtimeFailures: number;
+}
+
+export interface AcpGuiAgent {
+  kind: string;
+  runtimeName: string;
+  status: string;
+  ready: boolean;
+  issue: string | null;
+  guidance: string[];
+}
+
+export interface AcpGuiSession {
+  sessionId: string;
+  promptCount: number;
+  cwd: string | null;
+  lastEvent: string | null;
+  lastTimestampMs: number | null;
+  journalPath: string;
+  logPath: string;
+}

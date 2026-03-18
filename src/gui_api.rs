@@ -26,6 +26,18 @@ pub struct AppSnapshot {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct AcpGuiSnapshot {
+    experimental: bool,
+    command: String,
+    transport: String,
+    process_model: String,
+    metrics: AcpGuiMetrics,
+    agents: Vec<AcpGuiAgent>,
+    sessions: Vec<AcpGuiSession>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct EnvironmentSnapshot {
     os: String,
     is_wsl: bool,
@@ -79,6 +91,38 @@ pub struct MissionModels {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct AcpGuiMetrics {
+    sessions_created: usize,
+    prompts_completed: usize,
+    prompts_cancelled: usize,
+    runtime_failures: usize,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AcpGuiAgent {
+    kind: String,
+    runtime_name: String,
+    status: String,
+    ready: bool,
+    issue: Option<String>,
+    guidance: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AcpGuiSession {
+    session_id: String,
+    prompt_count: usize,
+    cwd: Option<String>,
+    last_event: Option<String>,
+    last_timestamp_ms: Option<i64>,
+    journal_path: String,
+    log_path: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ModelOption {
     display_name: String,
     model: String,
@@ -109,6 +153,15 @@ pub fn print_snapshot_json() -> Result<()> {
     println!(
         "{}",
         serde_json::to_string(&snapshot).context("failed to encode snapshot")?
+    );
+    Ok(())
+}
+
+pub fn print_acp_snapshot_json() -> Result<()> {
+    let snapshot = load_acp_snapshot()?;
+    println!(
+        "{}",
+        serde_json::to_string(&snapshot).context("failed to encode ACP snapshot")?
     );
     Ok(())
 }
@@ -161,6 +214,50 @@ fn load_snapshot() -> Result<AppSnapshot> {
         factory,
         models: read_model_catalog(),
         droids: merge_droids(workspace_droids, machine_droids),
+    })
+}
+
+fn load_acp_snapshot() -> Result<AcpGuiSnapshot> {
+    let paths = build_paths()?;
+    paths.ensure_runtime_dirs()?;
+    let snapshot = crate::acp::snapshot::build_snapshot(&paths)?;
+
+    Ok(AcpGuiSnapshot {
+        experimental: snapshot.experimental,
+        command: snapshot.command.to_string(),
+        transport: snapshot.transport.to_string(),
+        process_model: snapshot.process_model.to_string(),
+        metrics: AcpGuiMetrics {
+            sessions_created: snapshot.metrics.sessions_created,
+            prompts_completed: snapshot.metrics.prompts_completed,
+            prompts_cancelled: snapshot.metrics.prompts_cancelled,
+            runtime_failures: snapshot.metrics.runtime_failures,
+        },
+        agents: snapshot
+            .agents
+            .into_iter()
+            .map(|agent| AcpGuiAgent {
+                kind: agent.kind.to_string(),
+                runtime_name: agent.runtime_name.to_string(),
+                status: agent.status.to_string(),
+                ready: agent.ready,
+                issue: agent.issue,
+                guidance: agent.guidance,
+            })
+            .collect(),
+        sessions: snapshot
+            .sessions
+            .into_iter()
+            .map(|session| AcpGuiSession {
+                session_id: session.session_id,
+                prompt_count: session.prompt_count,
+                cwd: session.cwd,
+                last_event: session.last_event,
+                last_timestamp_ms: session.last_timestamp_ms.map(|value| value as i64),
+                journal_path: session.journal_path.display().to_string(),
+                log_path: session.log_path.display().to_string(),
+            })
+            .collect(),
     })
 }
 

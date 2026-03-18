@@ -38,6 +38,8 @@ export async function call<T>(
   switch (command) {
     case "load_snapshot":
       return fetchBridge<T>("/snapshot");
+    case "load_acp_snapshot":
+      return fetchBridge<T>("/acp-snapshot");
     case "tail_logs":
       return fetchBridge<T>(`/logs?limit=${args?.limit ?? 160}`);
     case "start_gateway":

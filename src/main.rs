@@ -108,6 +108,8 @@ enum Commands {
     Doctor(DoctorArgs),
     #[command(name = "gui-snapshot", hide = true)]
     GuiSnapshot,
+    #[command(name = "gui-acp-snapshot", hide = true)]
+    GuiAcpSnapshot,
     #[command(name = "gui-logs", hide = true)]
     GuiLogs(GuiLogsArgs),
     #[command(name = "gui-start", hide = true)]
@@ -455,6 +457,7 @@ fn run_cli() -> Result<()> {
         Commands::FactoryConfig(args) => command_factory_config(args),
         Commands::Doctor(args) => command_doctor(args),
         Commands::GuiSnapshot => gui_api::print_snapshot_json(),
+        Commands::GuiAcpSnapshot => gui_api::print_acp_snapshot_json(),
         Commands::GuiLogs(args) => gui_api::print_logs_json(args.limit),
         Commands::GuiStart => gui_api::print_command_result_json(&["start"]),
         Commands::GuiStop => gui_api::print_command_result_json(&["stop"]),

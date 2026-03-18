@@ -52,6 +52,11 @@ pub async fn load_snapshot(app: AppHandle) -> Result<Value, String> {
 }
 
 #[tauri::command]
+pub async fn load_acp_snapshot(app: AppHandle) -> Result<Value, String> {
+    run_json_command(&app, &["gui-acp-snapshot"]).await
+}
+
+#[tauri::command]
 pub async fn tail_logs(app: AppHandle, limit: Option<usize>) -> Result<Vec<String>, String> {
     let args = vec![
         "gui-logs".to_string(),

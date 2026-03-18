@@ -60,6 +60,11 @@ function factoryControlBridge(): Plugin {
             return;
           }
 
+          if (req.method === "GET" && url.pathname === "/acp-snapshot") {
+            writeJson(await execGateway(["gui-acp-snapshot"]));
+            return;
+          }
+
           if (req.method === "GET" && url.pathname === "/logs") {
             writeJson(
               await execGateway([
