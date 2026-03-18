@@ -146,8 +146,10 @@ pub struct AcpGuiSessionEvent {
 #[serde(rename_all = "camelCase")]
 pub struct AcpGuiIssue {
     scope: String,
+    severity: String,
     label: String,
     message: String,
+    hint: Option<String>,
     session_id: Option<String>,
     agent_kind: Option<String>,
     cwd: Option<String>,
@@ -292,8 +294,10 @@ fn load_acp_snapshot() -> Result<AcpGuiSnapshot> {
             .into_iter()
             .map(|issue| AcpGuiIssue {
                 scope: issue.scope.to_string(),
+                severity: issue.severity.to_string(),
                 label: issue.label,
                 message: issue.message,
+                hint: issue.hint,
                 session_id: issue.session_id,
                 agent_kind: issue.agent_kind,
                 cwd: issue.cwd,

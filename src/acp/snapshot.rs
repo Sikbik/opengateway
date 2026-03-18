@@ -10,6 +10,8 @@ use super::transport::TRANSPORT_NAME;
 use crate::paths::AppPaths;
 use anyhow::Result;
 use serde::Serialize;
+use std::cmp::Reverse;
+use std::collections::HashSet;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct AcpSnapshot {
@@ -62,8 +64,11 @@ pub struct AcpAgentSnapshot {
 #[derive(Debug, Clone, Serialize)]
 pub struct AcpIssueSnapshot {
     pub scope: &'static str,
+    pub severity: &'static str,
     pub label: String,
     pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hint: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -123,8 +128,10 @@ pub fn build_snapshot(paths: &AppPaths) -> Result<AcpSnapshot> {
     if let Some(issue) = codex_runtime.issue.clone() {
         issues.push(AcpIssueSnapshot {
             scope: "adapter",
+            severity: "critical",
             label: "codex".to_string(),
             message: issue,
+            hint: codex::doctor_guidance(&codex_runtime).into_iter().next(),
             session_id: None,
             agent_kind: Some("codex".to_string()),
             cwd: None,
@@ -136,6 +143,7 @@ pub fn build_snapshot(paths: &AppPaths) -> Result<AcpSnapshot> {
             .into_iter()
             .map(map_session_issue),
     );
+    let issues = rank_and_dedupe_issues(issues);
 
     Ok(AcpSnapshot {
         experimental: true,
@@ -161,8 +169,10 @@ pub fn build_snapshot(paths: &AppPaths) -> Result<AcpSnapshot> {
 fn map_session_issue(issue: SessionIssueSummary) -> AcpIssueSnapshot {
     AcpIssueSnapshot {
         scope: "session",
+        severity: "warning",
         label: issue.session_id.clone(),
         message: issue.message,
+        hint: Some("Open the session detail card and tail the ACP log for this session.".to_string()),
         session_id: Some(issue.session_id),
         agent_kind: issue.agent_kind,
         cwd: issue.cwd,
@@ -170,9 +180,40 @@ fn map_session_issue(issue: SessionIssueSummary) -> AcpIssueSnapshot {
     }
 }
 
+fn rank_and_dedupe_issues(mut issues: Vec<AcpIssueSnapshot>) -> Vec<AcpIssueSnapshot> {
+    issues.sort_by_key(|issue| {
+        (
+            issue_priority(issue.severity),
+            Reverse(issue.timestamp_ms.unwrap_or_default()),
+            issue.label.clone(),
+            issue.message.clone(),
+        )
+    });
+
+    let mut seen = HashSet::new();
+    issues.retain(|issue| {
+        seen.insert(format!(
+            "{}|{}|{}|{}",
+            issue.scope,
+            issue.label,
+            issue.session_id.as_deref().unwrap_or(""),
+            issue.message
+        ))
+    });
+    issues
+}
+
+fn issue_priority(severity: &str) -> u8 {
+    match severity {
+        "critical" => 0,
+        "warning" => 1,
+        _ => 2,
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::build_snapshot;
+    use super::{build_snapshot, rank_and_dedupe_issues, AcpIssueSnapshot};
     use crate::acp::journal::append_journal_event;
     use crate::paths::build_paths;
     use serde_json::json;
@@ -208,5 +249,49 @@ mod tests {
         assert_eq!(snapshot.agents[1].kind, "claude");
 
         let _ = fs::remove_dir_all(test_root);
+    }
+
+    #[test]
+    fn rank_and_dedupe_issues_prefers_critical_and_keeps_latest_unique_entries() {
+        let issues = rank_and_dedupe_issues(vec![
+            AcpIssueSnapshot {
+                scope: "session",
+                severity: "warning",
+                label: "session-000002".to_string(),
+                message: "older warning".to_string(),
+                hint: None,
+                session_id: Some("session-000002".to_string()),
+                agent_kind: Some("codex".to_string()),
+                cwd: None,
+                timestamp_ms: Some(10),
+            },
+            AcpIssueSnapshot {
+                scope: "adapter",
+                severity: "critical",
+                label: "codex".to_string(),
+                message: "missing runtime".to_string(),
+                hint: Some("Install Codex.".to_string()),
+                session_id: None,
+                agent_kind: Some("codex".to_string()),
+                cwd: None,
+                timestamp_ms: None,
+            },
+            AcpIssueSnapshot {
+                scope: "session",
+                severity: "warning",
+                label: "session-000002".to_string(),
+                message: "older warning".to_string(),
+                hint: None,
+                session_id: Some("session-000002".to_string()),
+                agent_kind: Some("codex".to_string()),
+                cwd: None,
+                timestamp_ms: Some(15),
+            },
+        ]);
+
+        assert_eq!(issues.len(), 2);
+        assert_eq!(issues[0].severity, "critical");
+        assert_eq!(issues[0].label, "codex");
+        assert_eq!(issues[1].timestamp_ms, Some(15));
     }
 }

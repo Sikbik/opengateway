@@ -129,8 +129,10 @@ export interface AcpGuiSessionEvent {
 
 export interface AcpGuiIssue {
   scope: string;
+  severity: string;
   label: string;
   message: string;
+  hint: string | null;
   sessionId: string | null;
   agentKind: string | null;
   cwd: string | null;

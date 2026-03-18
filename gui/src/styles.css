@@ -777,6 +777,14 @@ pre {
   overflow-wrap: anywhere;
 }
 
+.acp-issue-card__hint {
+  margin: -2px 0 0;
+  color: var(--muted);
+  font-size: 0.78rem;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
 .acp-issue-card__facts {
   display: flex;
   flex-wrap: wrap;

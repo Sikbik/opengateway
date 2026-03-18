@@ -146,6 +146,10 @@ function formatSessionState(value: string | null | undefined) {
   return value.replace(/[_-]+/g, " ");
 }
 
+function issueChipClass(severity: string | null | undefined) {
+  return severity === "critical" ? "chip chip--flagged" : "chip chip--inherit";
+}
+
 function formatSessionEvent(value: string | null | undefined) {
   if (!value) {
     return "No activity";
@@ -1672,10 +1676,13 @@ function App() {
                     >
                       <div className="acp-issue-card__head">
                         <div className="acp-issue-card__title">
-                          <span className="chip chip--flagged">
-                            {formatSessionEvent(issue.scope)}
+                          <span className={issueChipClass(issue.severity)}>
+                            {formatSessionState(issue.severity)}
                           </span>
                           <strong>{issue.label}</strong>
+                          <span className="chip chip--inherit">
+                            {formatSessionEvent(issue.scope)}
+                          </span>
                           {issue.agentKind ? (
                             <span className="chip chip--inherit">{issue.agentKind}</span>
                           ) : null}
@@ -1685,6 +1692,9 @@ function App() {
                         </span>
                       </div>
                       <p className="acp-issue-card__message">{issue.message}</p>
+                      {issue.hint ? (
+                        <p className="acp-issue-card__hint">{issue.hint}</p>
+                      ) : null}
                       <div className="acp-issue-card__facts">
                         {issue.sessionId ? (
                           <span>session {issue.sessionId}</span>
