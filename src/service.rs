@@ -270,7 +270,12 @@ fn handle_connection(mut stream: TcpStream, state: Arc<ServiceState>) -> Result<
         return Ok(());
     }
 
-    if request.method == "POST" && (path == "/v1/chat/completions" || path == "/v1/responses") {
+    if request.method == "POST"
+        && (path == "/v1/chat/completions"
+            || path == "/v1/responses"
+            || path == "/v1/messages"
+            || path == "/messages")
+    {
         if let Err(err) = proxy_upstream(&mut stream, request, &state) {
             crate::runtime_log_error(format!("upstream proxy error: {err:#}"));
             let response = plain_text_response(502, "bad gateway");
@@ -549,6 +554,13 @@ struct AcpResponseMeta {
     created: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AcpHttpSurface {
+    OpenAiChatCompletions,
+    OpenAiResponses,
+    AnthropicMessages,
+}
+
 fn proxy_acp(
     client_stream: &mut TcpStream,
     request: HttpRequest,
@@ -557,6 +569,15 @@ fn proxy_acp(
 ) -> Result<()> {
     let client_requested_stream = request_prefers_stream(&request.body);
     let path = request.path.split('?').next().unwrap_or_default();
+    let surface = match classify_acp_http_surface(path) {
+        Ok(surface) => surface,
+        Err(error) => {
+            let response =
+                openai_error_response(400, error.to_string(), "invalid_request_error");
+            write_http_response(client_stream, &response)?;
+            return Ok(());
+        }
+    };
     let payload: Value = match serde_json::from_slice(&request.body) {
         Ok(payload) => payload,
         Err(error) => {
@@ -638,7 +659,7 @@ fn proxy_acp(
     };
 
     if client_requested_stream {
-        let headers = vec![
+        let mut headers = vec![
             (
                 "Content-Type".to_string(),
                 "text/event-stream; charset=utf-8".to_string(),
@@ -646,13 +667,19 @@ fn proxy_acp(
             ("Cache-Control".to_string(), "no-cache".to_string()),
             ("X-Accel-Buffering".to_string(), "no".to_string()),
         ];
+        if surface == AcpHttpSurface::AnthropicMessages {
+            headers.push((
+                "anthropic-version".to_string(),
+                "2023-06-01".to_string(),
+            ));
+        }
         write_http_response_head(client_stream, 200, &headers, None)?;
-        emit_acp_sse_prelude(client_stream, path, &response_meta)?;
+        emit_acp_stream_prelude(client_stream, surface, &response_meta)?;
     }
 
     let prompt_result = bridge.prompt(&session_id, &prompt_text, |chunk| {
         if client_requested_stream {
-            emit_acp_sse_chunk(client_stream, path, &response_meta, chunk)?;
+            emit_acp_stream_chunk(client_stream, surface, &response_meta, chunk)?;
         }
         Ok(())
     });
@@ -660,16 +687,16 @@ fn proxy_acp(
     match prompt_result {
         Ok(result) => {
             if client_requested_stream {
-                emit_acp_sse_completion(
+                emit_acp_stream_completion(
                     client_stream,
-                    path,
+                    surface,
                     &response_meta,
                     &result.reply_text,
                     &result.stop_reason,
                 )?;
             } else {
                 let response = build_acp_http_response(
-                    path,
+                    surface,
                     &response_meta,
                     &result.reply_text,
                     &result.stop_reason,
@@ -679,33 +706,20 @@ fn proxy_acp(
         }
         Err(error) => {
             if client_requested_stream {
-                write_sse_data(
-                    client_stream,
-                    &json!({
-                        "type": "response.failed",
-                        "response": {
-                            "id": response_meta.response_id,
-                            "object": "response",
-                            "created_at": response_meta.created,
-                            "status": "failed",
-                            "model": response_meta.model,
-                            "error": {
-                                "message": format!("ACP prompt failed: {error}"),
-                                "type": "bad_gateway"
-                            }
-                        }
-                    }),
-                )?;
-                client_stream
-                    .write_all(b"data: [DONE]\n\n")
-                    .context("failed writing ACP SSE terminator")?;
-                client_stream.flush().ok();
+                emit_acp_stream_error(client_stream, surface, &response_meta, &error.to_string())?;
             } else {
-                let response = openai_error_response(
-                    502,
-                    format!("ACP prompt failed: {error}"),
-                    "bad_gateway",
-                );
+                let response = match surface {
+                    AcpHttpSurface::AnthropicMessages => anthropic_error_response(
+                        502,
+                        format!("ACP prompt failed: {error}"),
+                        "api_error",
+                    ),
+                    _ => openai_error_response(
+                        502,
+                        format!("ACP prompt failed: {error}"),
+                        "bad_gateway",
+                    ),
+                };
                 write_http_response(client_stream, &response)?;
             }
         }
@@ -739,6 +753,15 @@ fn parse_acp_model_route(model_id: &str) -> Option<AcpModelRoute> {
         requested_model: trimmed.to_string(),
         runtime_model: runtime_model.filter(|value| !value.is_empty()),
     })
+}
+
+fn classify_acp_http_surface(path: &str) -> Result<AcpHttpSurface> {
+    match path {
+        "/v1/chat/completions" => Ok(AcpHttpSurface::OpenAiChatCompletions),
+        "/v1/responses" => Ok(AcpHttpSurface::OpenAiResponses),
+        "/v1/messages" | "/messages" => Ok(AcpHttpSurface::AnthropicMessages),
+        other => bail!("ACP model requests are not supported on {other}"),
+    }
 }
 
 fn resolve_acp_workspace(request: &HttpRequest, default_workspace: Option<&Path>) -> Result<PathBuf> {
@@ -1061,14 +1084,14 @@ fn rpc_error_message(error: &Value) -> String {
 }
 
 fn build_acp_http_response(
-    path: &str,
+    surface: AcpHttpSurface,
     meta: &AcpResponseMeta,
     text: &str,
     stop_reason: &str,
 ) -> HttpResponse {
-    json_response(
-        200,
-        if path == "/v1/chat/completions" {
+    match surface {
+        AcpHttpSurface::OpenAiChatCompletions => json_response(
+            200,
             json!({
                 "id": meta.response_id,
                 "object": "chat.completion",
@@ -1084,8 +1107,10 @@ fn build_acp_http_response(
                         "finish_reason": chat_finish_reason(stop_reason)
                     }
                 ]
-            })
-        } else {
+            }),
+        ),
+        AcpHttpSurface::OpenAiResponses => json_response(
+            200,
             json!({
                 "id": meta.response_id,
                 "object": "response",
@@ -1107,18 +1132,39 @@ fn build_acp_http_response(
                     }
                 ],
                 "output_text": text
-            })
-        },
-    )
+            }),
+        ),
+        AcpHttpSurface::AnthropicMessages => json_response(
+            200,
+            json!({
+                "id": meta.message_id,
+                "type": "message",
+                "role": "assistant",
+                "model": meta.model,
+                "content": [
+                    {
+                        "type": "text",
+                        "text": text,
+                    }
+                ],
+                "stop_reason": anthropic_stop_reason(stop_reason),
+                "stop_sequence": Value::Null,
+                "usage": {
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                }
+            }),
+        ),
+    }
 }
 
-fn emit_acp_sse_prelude(
+fn emit_acp_stream_prelude(
     client_stream: &mut TcpStream,
-    path: &str,
+    surface: AcpHttpSurface,
     meta: &AcpResponseMeta,
 ) -> Result<()> {
-    if path == "/v1/chat/completions" {
-        write_sse_data(
+    match surface {
+        AcpHttpSurface::OpenAiChatCompletions => write_sse_data(
             client_stream,
             &json!({
                 "id": meta.response_id,
@@ -1135,9 +1181,8 @@ fn emit_acp_sse_prelude(
                     }
                 ]
             }),
-        )
-    } else {
-        write_sse_data(
+        ),
+        AcpHttpSurface::OpenAiResponses => write_sse_data(
             client_stream,
             &json!({
                 "type": "response.created",
@@ -1150,18 +1195,52 @@ fn emit_acp_sse_prelude(
                     "output": []
                 }
             }),
-        )
+        ),
+        AcpHttpSurface::AnthropicMessages => {
+            write_anthropic_sse_event(
+                client_stream,
+                "message_start",
+                &json!({
+                    "type": "message_start",
+                    "message": {
+                        "id": meta.message_id,
+                        "type": "message",
+                        "role": "assistant",
+                        "model": meta.model,
+                        "content": [],
+                        "stop_reason": Value::Null,
+                        "stop_sequence": Value::Null,
+                        "usage": {
+                            "input_tokens": 0,
+                            "output_tokens": 0,
+                        }
+                    }
+                }),
+            )?;
+            write_anthropic_sse_event(
+                client_stream,
+                "content_block_start",
+                &json!({
+                    "type": "content_block_start",
+                    "index": 0,
+                    "content_block": {
+                        "type": "text",
+                        "text": "",
+                    }
+                }),
+            )
+        }
     }
 }
 
-fn emit_acp_sse_chunk(
+fn emit_acp_stream_chunk(
     client_stream: &mut TcpStream,
-    path: &str,
+    surface: AcpHttpSurface,
     meta: &AcpResponseMeta,
     text: &str,
 ) -> Result<()> {
-    if path == "/v1/chat/completions" {
-        write_sse_data(
+    match surface {
+        AcpHttpSurface::OpenAiChatCompletions => write_sse_data(
             client_stream,
             &json!({
                 "id": meta.response_id,
@@ -1178,78 +1257,176 @@ fn emit_acp_sse_chunk(
                     }
                 ]
             }),
-        )
-    } else {
-        write_sse_data(
+        ),
+        AcpHttpSurface::OpenAiResponses => write_sse_data(
             client_stream,
             &json!({
                 "type": "response.output_text.delta",
                 "response_id": meta.response_id,
                 "delta": text
             }),
-        )
+        ),
+        AcpHttpSurface::AnthropicMessages => write_anthropic_sse_event(
+            client_stream,
+            "content_block_delta",
+            &json!({
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {
+                    "type": "text_delta",
+                    "text": text,
+                }
+            }),
+        ),
     }
 }
 
-fn emit_acp_sse_completion(
+fn emit_acp_stream_completion(
     client_stream: &mut TcpStream,
-    path: &str,
+    surface: AcpHttpSurface,
     meta: &AcpResponseMeta,
     text: &str,
     stop_reason: &str,
 ) -> Result<()> {
-    if path == "/v1/chat/completions" {
-        write_sse_data(
-            client_stream,
-            &json!({
-                "id": meta.response_id,
-                "object": "chat.completion.chunk",
-                "created": meta.created,
-                "model": meta.model,
-                "choices": [
-                    {
-                        "index": 0,
-                        "delta": {},
-                        "finish_reason": chat_finish_reason(stop_reason)
-                    }
-                ]
-            }),
-        )?;
-    } else {
-        write_sse_data(
-            client_stream,
-            &json!({
-                "type": "response.completed",
-                "response": {
+    match surface {
+        AcpHttpSurface::OpenAiChatCompletions => {
+            write_sse_data(
+                client_stream,
+                &json!({
                     "id": meta.response_id,
-                    "object": "response",
-                    "created_at": meta.created,
-                    "status": "completed",
+                    "object": "chat.completion.chunk",
+                    "created": meta.created,
                     "model": meta.model,
-                    "output": [
+                    "choices": [
                         {
-                            "type": "message",
-                            "id": meta.message_id,
-                            "role": "assistant",
-                            "content": [
-                                {
-                                    "type": "output_text",
-                                    "text": text,
-                                    "annotations": []
-                                }
-                            ]
+                            "index": 0,
+                            "delta": {},
+                            "finish_reason": chat_finish_reason(stop_reason)
                         }
-                    ],
-                    "output_text": text
+                    ]
+                }),
+            )?;
+            client_stream
+                .write_all(b"data: [DONE]\n\n")
+                .context("failed writing ACP SSE terminator")?;
+            client_stream.flush().ok();
+            Ok(())
+        }
+        AcpHttpSurface::OpenAiResponses => {
+            write_sse_data(
+                client_stream,
+                &json!({
+                    "type": "response.completed",
+                    "response": {
+                        "id": meta.response_id,
+                        "object": "response",
+                        "created_at": meta.created,
+                        "status": "completed",
+                        "model": meta.model,
+                        "output": [
+                            {
+                                "type": "message",
+                                "id": meta.message_id,
+                                "role": "assistant",
+                                "content": [
+                                    {
+                                        "type": "output_text",
+                                        "text": text,
+                                        "annotations": []
+                                    }
+                                ]
+                            }
+                        ],
+                        "output_text": text
+                    }
+                }),
+            )?;
+            client_stream
+                .write_all(b"data: [DONE]\n\n")
+                .context("failed writing ACP SSE terminator")?;
+            client_stream.flush().ok();
+            Ok(())
+        }
+        AcpHttpSurface::AnthropicMessages => {
+            write_anthropic_sse_event(
+                client_stream,
+                "content_block_stop",
+                &json!({
+                    "type": "content_block_stop",
+                    "index": 0,
+                }),
+            )?;
+            write_anthropic_sse_event(
+                client_stream,
+                "message_delta",
+                &json!({
+                    "type": "message_delta",
+                    "delta": {
+                        "stop_reason": anthropic_stop_reason(stop_reason),
+                        "stop_sequence": Value::Null,
+                    },
+                    "usage": {
+                        "output_tokens": 0,
+                    }
+                }),
+            )?;
+            write_anthropic_sse_event(
+                client_stream,
+                "message_stop",
+                &json!({
+                    "type": "message_stop",
+                }),
+            )
+        }
+    }
+}
+
+fn emit_acp_stream_error(
+    client_stream: &mut TcpStream,
+    surface: AcpHttpSurface,
+    meta: &AcpResponseMeta,
+    error: &str,
+) -> Result<()> {
+    match surface {
+        AcpHttpSurface::AnthropicMessages => write_anthropic_sse_event(
+            client_stream,
+            "error",
+            &json!({
+                "type": "error",
+                "error": {
+                    "type": "api_error",
+                    "message": error,
+                },
+                "message": {
+                    "id": meta.message_id,
                 }
             }),
-        )?;
+        ),
+        _ => {
+            write_sse_data(
+                client_stream,
+                &json!({
+                    "type": "response.failed",
+                    "response": {
+                        "id": meta.response_id,
+                        "object": "response",
+                        "created_at": meta.created,
+                        "status": "failed",
+                        "model": meta.model,
+                        "error": {
+                            "message": error,
+                            "type": "bad_gateway"
+                        }
+                    }
+                }),
+            )?;
+            client_stream
+                .write_all(b"data: [DONE]\n\n")
+                .context("failed writing ACP SSE terminator")?;
+            client_stream.flush().ok();
+            Ok(())
+        }
     }
-    client_stream
-        .write_all(b"data: [DONE]\n\n")
-        .context("failed writing ACP SSE terminator")?;
-    client_stream.flush().ok();
-    Ok(())
 }
 
 fn write_sse_data(client_stream: &mut TcpStream, payload: &Value) -> Result<()> {
@@ -1259,10 +1436,29 @@ fn write_sse_data(client_stream: &mut TcpStream, payload: &Value) -> Result<()> 
     Ok(())
 }
 
+fn write_anthropic_sse_event(
+    client_stream: &mut TcpStream,
+    event: &str,
+    payload: &Value,
+) -> Result<()> {
+    let rendered = serde_json::to_string(payload).context("failed to encode anthropic SSE payload")?;
+    write!(client_stream, "event: {event}\ndata: {rendered}\n\n")
+        .context("failed writing anthropic SSE payload")?;
+    client_stream.flush().ok();
+    Ok(())
+}
+
 fn chat_finish_reason(stop_reason: &str) -> &str {
     match stop_reason {
         "cancelled" => "stop",
         _ => "stop",
+    }
+}
+
+fn anthropic_stop_reason(stop_reason: &str) -> &str {
+    match stop_reason {
+        "cancelled" => "end_turn",
+        _ => "end_turn",
     }
 }
 
@@ -2125,6 +2321,23 @@ fn openai_error_response(status: u16, message: impl Into<String>, error_type: &s
     )
 }
 
+fn anthropic_error_response(
+    status: u16,
+    message: impl Into<String>,
+    error_type: &str,
+) -> HttpResponse {
+    json_response(
+        status,
+        json!({
+            "type": "error",
+            "error": {
+                "type": error_type,
+                "message": message.into(),
+            }
+        }),
+    )
+}
+
 fn is_authorized(request: &HttpRequest, expected_api_key: &str) -> bool {
     if expected_api_key.is_empty() {
         return true;
@@ -2724,5 +2937,51 @@ mod tests {
 
         assert_eq!(resolved, nested);
         let _ = std::fs::remove_dir_all(workspace_root);
+    }
+
+    #[test]
+    fn classifies_anthropic_messages_surface() {
+        assert_eq!(
+            classify_acp_http_surface("/v1/messages").expect("surface should parse"),
+            AcpHttpSurface::AnthropicMessages
+        );
+    }
+
+    #[test]
+    fn builds_anthropic_acp_response_shape() {
+        let response = build_acp_http_response(
+            AcpHttpSurface::AnthropicMessages,
+            &AcpResponseMeta {
+                response_id: "resp_1".to_string(),
+                message_id: "msg_1".to_string(),
+                model: "acp:claude:claude-sonnet-4-6".to_string(),
+                created: 123,
+            },
+            "Hello",
+            "end_turn",
+        );
+
+        let payload: Value =
+            serde_json::from_slice(&response.body).expect("anthropic payload should decode");
+        assert_eq!(payload.get("type").and_then(Value::as_str), Some("message"));
+        assert_eq!(payload.get("role").and_then(Value::as_str), Some("assistant"));
+        assert_eq!(
+            payload
+                .get("content")
+                .and_then(Value::as_array)
+                .and_then(|items| items.first())
+                .and_then(|item| item.get("type"))
+                .and_then(Value::as_str),
+            Some("text")
+        );
+        assert_eq!(
+            payload
+                .get("content")
+                .and_then(Value::as_array)
+                .and_then(|items| items.first())
+                .and_then(|item| item.get("text"))
+                .and_then(Value::as_str),
+            Some("Hello")
+        );
     }
 }

@@ -45,7 +45,7 @@ const CREATE_NO_WINDOW: u32 = 0x08000000;
 const DETACHED_PROCESS: u32 = 0x00000008;
 const FACTORY_PREFERRED_MODEL: &str = "gpt-5.4(xhigh)";
 const FACTORY_PREFERRED_REASONING_EFFORT: &str = "xhigh";
-const DEFAULT_OPENAI_MODEL_CATALOG: [(&str, &str); 28] = [
+const DEFAULT_OPENAI_MODEL_CATALOG: &[(&str, &str)] = &[
     ("gpt-5.4", "GPT-5.4"),
     ("gpt-5.4(low)", "GPT-5.4 (Low)"),
     ("gpt-5.4(medium)", "GPT-5.4 (Medium)"),
@@ -74,6 +74,65 @@ const DEFAULT_OPENAI_MODEL_CATALOG: [(&str, &str); 28] = [
     ("gpt-5(high)", "GPT-5 (High)"),
     ("acp:codex", "ACP Codex"),
     ("acp:claude", "ACP Claude"),
+    ("acp:claude:claude-sonnet-4-6", "ACP Claude Sonnet 4.6"),
+    (
+        "acp:claude:claude-sonnet-4-6(low)",
+        "ACP Claude Sonnet 4.6 (Low)",
+    ),
+    (
+        "acp:claude:claude-sonnet-4-6(medium)",
+        "ACP Claude Sonnet 4.6 (Medium)",
+    ),
+    (
+        "acp:claude:claude-sonnet-4-6(high)",
+        "ACP Claude Sonnet 4.6 (High)",
+    ),
+    (
+        "acp:claude:claude-sonnet-4-6[1m]",
+        "ACP Claude Sonnet 4.6 (1M Context)",
+    ),
+    (
+        "acp:claude:claude-sonnet-4-6[1m](low)",
+        "ACP Claude Sonnet 4.6 (1M Context, Low)",
+    ),
+    (
+        "acp:claude:claude-sonnet-4-6[1m](medium)",
+        "ACP Claude Sonnet 4.6 (1M Context, Medium)",
+    ),
+    (
+        "acp:claude:claude-sonnet-4-6[1m](high)",
+        "ACP Claude Sonnet 4.6 (1M Context, High)",
+    ),
+    ("acp:claude:claude-opus-4-6", "ACP Claude Opus 4.6"),
+    (
+        "acp:claude:claude-opus-4-6(low)",
+        "ACP Claude Opus 4.6 (Low)",
+    ),
+    (
+        "acp:claude:claude-opus-4-6(medium)",
+        "ACP Claude Opus 4.6 (Medium)",
+    ),
+    (
+        "acp:claude:claude-opus-4-6(high)",
+        "ACP Claude Opus 4.6 (High)",
+    ),
+    (
+        "acp:claude:claude-opus-4-6[1m]",
+        "ACP Claude Opus 4.6 (1M Context)",
+    ),
+    (
+        "acp:claude:claude-opus-4-6[1m](low)",
+        "ACP Claude Opus 4.6 (1M Context, Low)",
+    ),
+    (
+        "acp:claude:claude-opus-4-6[1m](medium)",
+        "ACP Claude Opus 4.6 (1M Context, Medium)",
+    ),
+    (
+        "acp:claude:claude-opus-4-6[1m](high)",
+        "ACP Claude Opus 4.6 (1M Context, High)",
+    ),
+    ("acp:claude:claude-haiku-4-5", "ACP Claude Haiku 4.5"),
 ];
 
 #[derive(Debug, Parser)]
@@ -1553,6 +1612,26 @@ fn model_display_name(model_id: &str) -> String {
         .unwrap_or_else(|| model_id.to_string())
 }
 
+fn is_acp_claude_model(model_id: &str) -> bool {
+    model_id == "acp:claude" || model_id.starts_with("acp:claude:")
+}
+
+fn factory_provider_for_model(model_id: &str) -> &'static str {
+    if is_acp_claude_model(model_id) {
+        "anthropic"
+    } else {
+        "openai"
+    }
+}
+
+fn factory_base_url_for_model(model_id: &str, base_url: &str) -> String {
+    if is_acp_claude_model(model_id) {
+        base_url.to_string()
+    } else {
+        format!("{base_url}/v1")
+    }
+}
+
 fn resolve_default_acp_workspace() -> Option<PathBuf> {
     if let Ok(raw) = std::env::var("OPENGATEWAY_WORKSPACE") {
         let trimmed = raw.trim();
@@ -1583,9 +1662,9 @@ fn build_factory_config(base_url: &str, api_key: &str, model_ids: &[String]) -> 
             json!({
               "model_display_name": model_display_name(model_id),
               "model": model_id,
-              "base_url": format!("{base_url}/v1"),
+              "base_url": factory_base_url_for_model(model_id, base_url),
               "api_key": api_key,
-              "provider": "openai"
+              "provider": factory_provider_for_model(model_id)
             })
         })
         .collect::<Vec<_>>();
@@ -1694,11 +1773,11 @@ fn build_factory_settings_model(
         "model": model_id,
         "id": factory_custom_model_id(&display_name, index),
         "index": index,
-        "baseUrl": format!("{base_url}/v1"),
+        "baseUrl": factory_base_url_for_model(model_id, base_url),
         "apiKey": api_key,
         "displayName": display_name,
         "noImageSupport": false,
-        "provider": "openai"
+        "provider": factory_provider_for_model(model_id)
     })
 }
 
@@ -1780,14 +1859,18 @@ fn collect_managed_factory_model_ids(
     base_url: &str,
     api_key: &str,
 ) -> HashSet<String> {
-    let expected_base_url = format!("{base_url}/v1");
-
     current_models
         .iter()
         .filter_map(Value::as_object)
         .filter(|model| {
-            model.get("provider").and_then(Value::as_str) == Some("openai")
-                && model.get("baseUrl").and_then(Value::as_str) == Some(expected_base_url.as_str())
+            let Some(model_id) = model.get("model").and_then(Value::as_str) else {
+                return false;
+            };
+            let expected_base_url = factory_base_url_for_model(model_id, base_url);
+            model.get("provider").and_then(Value::as_str)
+                == Some(factory_provider_for_model(model_id))
+                && model.get("baseUrl").and_then(Value::as_str)
+                    == Some(expected_base_url.as_str())
                 && model.get("apiKey").and_then(Value::as_str) == Some(api_key)
         })
         .filter_map(|model| model.get("id").and_then(Value::as_str))
@@ -2400,6 +2483,44 @@ mod tests {
                 .and_then(|settings| settings.get("workerReasoningEffort"))
                 .and_then(Value::as_str),
             Some("xhigh")
+        );
+    }
+
+    #[test]
+    fn builds_anthropic_factory_model_metadata_for_acp_claude() {
+        let model = build_factory_settings_model(
+            "acp:claude:claude-sonnet-4-6",
+            "http://127.0.0.1:42069",
+            "secret",
+            27,
+        );
+
+        assert_eq!(
+            model.get("provider").and_then(Value::as_str),
+            Some("anthropic")
+        );
+        assert_eq!(
+            model.get("baseUrl").and_then(Value::as_str),
+            Some("http://127.0.0.1:42069")
+        );
+    }
+
+    #[test]
+    fn builds_openai_factory_model_metadata_for_acp_codex() {
+        let model = build_factory_settings_model(
+            "acp:codex",
+            "http://127.0.0.1:42069",
+            "secret",
+            26,
+        );
+
+        assert_eq!(
+            model.get("provider").and_then(Value::as_str),
+            Some("openai")
+        );
+        assert_eq!(
+            model.get("baseUrl").and_then(Value::as_str),
+            Some("http://127.0.0.1:42069/v1")
         );
     }
 }

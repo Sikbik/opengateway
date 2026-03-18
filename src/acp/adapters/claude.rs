@@ -38,6 +38,7 @@ pub struct ClaudeRuntimeReadiness {
     pub supports_partial_messages: bool,
     pub supports_permission_mode: bool,
     pub supports_model_flag: bool,
+    pub supports_effort_flag: bool,
     pub supports_no_session_persistence: bool,
     pub supports_verbose: bool,
     pub auth_ready: bool,
@@ -112,8 +113,15 @@ struct PrintHelpCapabilities {
     supports_partial_messages: bool,
     supports_permission_mode: bool,
     supports_model_flag: bool,
+    supports_effort_flag: bool,
     supports_no_session_persistence: bool,
     supports_verbose: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ClaudeModelSelection {
+    model: Option<String>,
+    effort: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -220,6 +228,7 @@ pub fn inspect_runtime() -> ClaudeRuntimeReadiness {
             supports_partial_messages: false,
             supports_permission_mode: false,
             supports_model_flag: false,
+            supports_effort_flag: false,
             supports_no_session_persistence: false,
             supports_verbose: false,
             auth_ready: false,
@@ -242,6 +251,7 @@ pub fn inspect_runtime() -> ClaudeRuntimeReadiness {
                 supports_partial_messages: false,
                 supports_permission_mode: false,
                 supports_model_flag: false,
+                supports_effort_flag: false,
                 supports_no_session_persistence: false,
                 supports_verbose: false,
                 auth_ready: false,
@@ -262,6 +272,7 @@ pub fn inspect_runtime() -> ClaudeRuntimeReadiness {
             supports_partial_messages: false,
             supports_permission_mode: false,
             supports_model_flag: false,
+            supports_effort_flag: false,
             supports_no_session_persistence: false,
             supports_verbose: false,
             auth_ready: false,
@@ -288,6 +299,7 @@ pub fn inspect_runtime() -> ClaudeRuntimeReadiness {
                 supports_partial_messages: false,
                 supports_permission_mode: false,
                 supports_model_flag: false,
+                supports_effort_flag: false,
                 supports_no_session_persistence: false,
                 supports_verbose: false,
                 auth_ready: false,
@@ -308,6 +320,7 @@ pub fn inspect_runtime() -> ClaudeRuntimeReadiness {
             supports_partial_messages: false,
             supports_permission_mode: false,
             supports_model_flag: false,
+            supports_effort_flag: false,
             supports_no_session_persistence: false,
             supports_verbose: false,
             auth_ready: false,
@@ -375,6 +388,7 @@ pub fn inspect_runtime() -> ClaudeRuntimeReadiness {
         supports_partial_messages: capabilities.supports_partial_messages,
         supports_permission_mode: capabilities.supports_permission_mode,
         supports_model_flag: capabilities.supports_model_flag,
+        supports_effort_flag: capabilities.supports_effort_flag,
         supports_no_session_persistence: capabilities.supports_no_session_persistence,
         supports_verbose: capabilities.supports_verbose,
         auth_ready,
@@ -629,8 +643,38 @@ fn parse_print_help_capabilities(help: &str) -> PrintHelpCapabilities {
         supports_partial_messages: help.contains("--include-partial-messages"),
         supports_permission_mode: help.contains("--permission-mode"),
         supports_model_flag: help.contains("--model"),
+        supports_effort_flag: help.contains("--effort"),
         supports_no_session_persistence: help.contains("--no-session-persistence"),
         supports_verbose: help.contains("--verbose"),
+    }
+}
+
+fn resolve_model_selection(model: Option<&str>) -> ClaudeModelSelection {
+    let Some(raw_model) = model.map(str::trim).filter(|value| !value.is_empty()) else {
+        return ClaudeModelSelection {
+            model: None,
+            effort: None,
+        };
+    };
+
+    if let Some((base, effort)) = raw_model.rsplit_once('(') {
+        if let Some(effort) = effort.strip_suffix(')') {
+            let normalized_effort = effort.trim().to_ascii_lowercase();
+            if matches!(
+                normalized_effort.as_str(),
+                "low" | "medium" | "high" | "max"
+            ) {
+                return ClaudeModelSelection {
+                    model: Some(base.trim().to_string()),
+                    effort: Some(normalized_effort),
+                };
+            }
+        }
+    }
+
+    ClaudeModelSelection {
+        model: Some(raw_model.to_string()),
+        effort: None,
     }
 }
 
@@ -699,6 +743,7 @@ impl ClaudePromptExecution {
         model: Option<&str>,
     ) -> Result<Self> {
         let prompt_text = build_claude_prompt(prompt, mcp_server_count)?;
+        let selection = resolve_model_selection(model);
         let mut command = Command::new(CLAUDE_EXECUTABLE);
         command
             .arg("-p")
@@ -711,10 +756,11 @@ impl ClaudePromptExecution {
             .arg("default")
             .arg("--no-session-persistence")
             .current_dir(cwd);
-        if let Some(model) = model {
-            if !model.trim().is_empty() {
-                command.arg("--model").arg(model);
-            }
+        if let Some(model) = selection.model.as_deref() {
+            command.arg("--model").arg(model);
+        }
+        if let Some(effort) = selection.effort.as_deref() {
+            command.arg("--effort").arg(effort);
         }
         #[cfg(windows)]
         command.creation_flags(CREATE_NO_WINDOW);
@@ -1149,7 +1195,7 @@ where
 mod tests {
     use super::{
         build_claude_prompt, doctor_guidance, parse_claude_events, parse_print_help_capabilities,
-        truncate_output, ClaudeRuntimeReadiness,
+        resolve_model_selection, truncate_output, ClaudeModelSelection, ClaudeRuntimeReadiness,
     };
     use crate::acp::session::ChildRuntimeUpdate;
     use crate::acp::session::PromptBlock;
@@ -1199,6 +1245,7 @@ Usage: claude [options] [command] [prompt]
       --include-partial-messages
       --permission-mode
       --model
+      --effort
       --no-session-persistence
       --verbose
 ";
@@ -1208,8 +1255,35 @@ Usage: claude [options] [command] [prompt]
         assert!(capabilities.supports_partial_messages);
         assert!(capabilities.supports_permission_mode);
         assert!(capabilities.supports_model_flag);
+        assert!(capabilities.supports_effort_flag);
         assert!(capabilities.supports_no_session_persistence);
         assert!(capabilities.supports_verbose);
+    }
+
+    #[test]
+    fn resolve_model_selection_extracts_effort_suffix() {
+        let selection = resolve_model_selection(Some("claude-opus-4-6[1m](high)"));
+
+        assert_eq!(
+            selection,
+            ClaudeModelSelection {
+                model: Some("claude-opus-4-6[1m]".to_string()),
+                effort: Some("high".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn resolve_model_selection_leaves_plain_models_untouched() {
+        let selection = resolve_model_selection(Some("claude-haiku-4-5"));
+
+        assert_eq!(
+            selection,
+            ClaudeModelSelection {
+                model: Some("claude-haiku-4-5".to_string()),
+                effort: None,
+            }
+        );
     }
 
     #[test]
@@ -1301,6 +1375,7 @@ Usage: claude [options] [command] [prompt]
             supports_partial_messages: false,
             supports_permission_mode: false,
             supports_model_flag: false,
+            supports_effort_flag: false,
             supports_no_session_persistence: false,
             supports_verbose: false,
             auth_ready: false,
@@ -1326,6 +1401,7 @@ Usage: claude [options] [command] [prompt]
             supports_partial_messages: true,
             supports_permission_mode: true,
             supports_model_flag: true,
+            supports_effort_flag: true,
             supports_no_session_persistence: true,
             supports_verbose: true,
             auth_ready: true,
