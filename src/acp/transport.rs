@@ -13,11 +13,12 @@ use super::supervisor::{CancelOutcome, RuntimeMode, SessionSupervisor};
 use crate::paths::AppPaths;
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
+use std::fs::{self, OpenOptions};
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub const TRANSPORT_NAME: &str = "stdio";
 
@@ -27,6 +28,7 @@ pub struct ServeConfig {
     pub workspace: Option<PathBuf>,
     pub paths: Option<AppPaths>,
     pub runtime_mode: RuntimeMode,
+    pub debug_trace_path: Option<PathBuf>,
 }
 
 struct ServerState {
@@ -122,6 +124,7 @@ where
                 if trimmed.is_empty() {
                     continue;
                 }
+                trace_raw_frame(&config, "in", trimmed)?;
 
                 let raw_value = match serde_json::from_str::<Value>(trimmed) {
                     Ok(value) => value,
@@ -131,6 +134,7 @@ where
                             &format!("acp parse error: {error}; frame={}", redact_text(trimmed)),
                         )?;
                         write_message(
+                            &config,
                             output,
                             &error_response(
                                 None,
@@ -147,6 +151,7 @@ where
 
                 if raw_value.is_array() {
                     write_message(
+                        &config,
                         output,
                         &error_response(
                             None,
@@ -160,6 +165,7 @@ where
                     Ok(request) => request,
                     Err(error) => {
                         write_message(
+                            &config,
                             output,
                             &error_response(
                                 None,
@@ -219,72 +225,59 @@ where
     W: Write,
     L: Write,
 {
+    let mut send = |value: &Value| write_message(config, output, value);
+
     if request.jsonrpc.as_deref() != Some(JSONRPC_VERSION) {
-        write_message(
-            output,
-            &error_response(
-                request.id,
-                RpcError::new(INVALID_REQUEST, "jsonrpc must be \"2.0\"", None),
-            ),
-        )?;
+        send(&error_response(
+            request.id,
+            RpcError::new(INVALID_REQUEST, "jsonrpc must be \"2.0\"", None),
+        ))?;
         return Ok(LoopControl::Continue);
     }
 
     let Some(method) = request.method.as_deref() else {
-        write_message(
-            output,
-            &error_response(
-                request.id,
-                RpcError::new(INVALID_REQUEST, "request is missing method", None),
-            ),
-        )?;
+        send(&error_response(
+            request.id,
+            RpcError::new(INVALID_REQUEST, "request is missing method", None),
+        ))?;
         return Ok(LoopControl::Continue);
     };
 
     match method {
         "initialize" => {
             let Some(id) = request.id else {
-                write_message(
-                    output,
-                    &error_response(
-                        None,
-                        RpcError::new(INVALID_REQUEST, "initialize must be sent as a request", None),
-                    ),
-                )?;
+                send(&error_response(
+                    None,
+                    RpcError::new(INVALID_REQUEST, "initialize must be sent as a request", None),
+                ))?;
                 return Ok(LoopControl::Continue);
             };
 
             state.initialized = true;
-            write_message(output, &success_response(id, initialize_result()))?;
+            send(&success_response(id, initialize_result()))?;
         }
         "shutdown" => {
             let Some(id) = request.id else {
-                write_message(
-                    output,
-                    &error_response(
-                        None,
-                        RpcError::new(INVALID_REQUEST, "shutdown must be sent as a request", None),
-                    ),
-                )?;
+                send(&error_response(
+                    None,
+                    RpcError::new(INVALID_REQUEST, "shutdown must be sent as a request", None),
+                ))?;
                 return Ok(LoopControl::Continue);
             };
 
             state.shutdown_requested = true;
-            write_message(output, &success_response(id, json!({})))?;
+            send(&success_response(id, json!({})))?;
         }
         other if !state.initialized => {
             if request.id.is_some() {
-                write_message(
-                    output,
-                    &error_response(
-                        request.id,
-                        RpcError::new(
-                            SERVER_NOT_INITIALIZED,
-                            "initialize must complete before other ACP methods are used",
-                            Some(json!({ "method": other })),
-                        ),
+                send(&error_response(
+                    request.id,
+                    RpcError::new(
+                        SERVER_NOT_INITIALIZED,
+                        "initialize must complete before other ACP methods are used",
+                        Some(json!({ "method": other })),
                     ),
-                )?;
+                ))?;
             } else {
                 log_line(
                     log,
@@ -294,30 +287,24 @@ where
         }
         "session/new" => {
             let Some(id) = request.id else {
-                write_message(
-                    output,
-                    &error_response(
-                        None,
-                        RpcError::new(INVALID_REQUEST, "session/new must be sent as a request", None),
-                    ),
-                )?;
+                send(&error_response(
+                    None,
+                    RpcError::new(INVALID_REQUEST, "session/new must be sent as a request", None),
+                ))?;
                 return Ok(LoopControl::Continue);
             };
 
             let params: NewSessionParams = match decode_params(request.params, "session/new") {
                 Ok(params) => params,
                 Err(error) => {
-                    write_message(
-                        output,
-                        &error_response(
-                            Some(id),
-                            RpcError::new(
-                                INVALID_REQUEST,
-                                "invalid params for session/new",
-                                Some(json!({ "detail": error.to_string() })),
-                            ),
+                    send(&error_response(
+                        Some(id),
+                        RpcError::new(
+                            INVALID_REQUEST,
+                            "invalid params for session/new",
+                            Some(json!({ "detail": error.to_string() })),
                         ),
-                    )?;
+                    ))?;
                     return Ok(LoopControl::Continue);
                 }
             };
@@ -329,17 +316,14 @@ where
             {
                 Ok(session) => session,
                 Err(error) => {
-                    write_message(
-                        output,
-                        &error_response(
-                            Some(id),
-                            RpcError::new(
-                                INTERNAL_ERROR,
-                                "failed to create ACP session",
-                                Some(json!({ "detail": error.to_string() })),
-                            ),
+                    send(&error_response(
+                        Some(id),
+                        RpcError::new(
+                            INTERNAL_ERROR,
+                            "failed to create ACP session",
+                            Some(json!({ "detail": error.to_string() })),
                         ),
-                    )?;
+                    ))?;
                     return Ok(LoopControl::Continue);
                 }
             };
@@ -374,61 +358,49 @@ where
                     session.model.as_deref().unwrap_or("default")
                 ),
             )?;
-            write_message(
-                output,
-                &success_response(
-                    id,
-                    json!({
-                        "sessionId": session.session_id,
-                    }),
-                ),
-            )?;
+            send(&success_response(
+                id,
+                json!({
+                    "sessionId": session.session_id,
+                }),
+            ))?;
         }
         "session/prompt" => {
             let Some(id) = request.id else {
-                write_message(
-                    output,
-                    &error_response(
+                send(&error_response(
+                    None,
+                    RpcError::new(
+                        INVALID_REQUEST,
+                        "session/prompt must be sent as a request",
                         None,
-                        RpcError::new(
-                            INVALID_REQUEST,
-                            "session/prompt must be sent as a request",
-                            None,
-                        ),
                     ),
-                )?;
+                ))?;
                 return Ok(LoopControl::Continue);
             };
 
             let params: PromptParams = match decode_params(request.params, "session/prompt") {
                 Ok(params) => params,
                 Err(error) => {
-                    write_message(
-                        output,
-                        &error_response(
-                            Some(id),
-                            RpcError::new(
-                                INVALID_REQUEST,
-                                "invalid params for session/prompt",
-                                Some(json!({ "detail": error.to_string() })),
-                            ),
+                    send(&error_response(
+                        Some(id),
+                        RpcError::new(
+                            INVALID_REQUEST,
+                            "invalid params for session/prompt",
+                            Some(json!({ "detail": error.to_string() })),
                         ),
-                    )?;
+                    ))?;
                     return Ok(LoopControl::Continue);
                 }
             };
             if state.active_prompt.is_some() {
-                write_message(
-                    output,
-                    &error_response(
-                        Some(id),
-                        RpcError::new(
-                            INVALID_REQUEST,
-                            "only one active ACP prompt is supported at a time in this MVP",
-                            None,
-                        ),
+                send(&error_response(
+                    Some(id),
+                    RpcError::new(
+                        INVALID_REQUEST,
+                        "only one active ACP prompt is supported at a time in this MVP",
+                        None,
                     ),
-                )?;
+                ))?;
                 return Ok(LoopControl::Continue);
             }
 
@@ -438,17 +410,14 @@ where
                 .expect("ACP supervisor mutex poisoned")
                 .contains(&params.session_id)
             {
-                write_message(
-                    output,
-                    &error_response(
-                        Some(id),
-                        RpcError::new(
-                            INVALID_REQUEST,
-                            "session/prompt references an unknown sessionId",
-                            Some(json!({ "sessionId": params.session_id })),
-                        ),
+                send(&error_response(
+                    Some(id),
+                    RpcError::new(
+                        INVALID_REQUEST,
+                        "session/prompt references an unknown sessionId",
+                        Some(json!({ "sessionId": params.session_id })),
                     ),
-                )?;
+                ))?;
                 return Ok(LoopControl::Continue);
             }
 
@@ -460,17 +429,14 @@ where
         }
         "session/cancel" => {
             if request.id.is_some() {
-                write_message(
-                    output,
-                    &error_response(
-                        request.id,
-                        RpcError::new(
-                            INVALID_REQUEST,
-                            "session/cancel must be sent as a notification",
-                            None,
-                        ),
+                send(&error_response(
+                    request.id,
+                    RpcError::new(
+                        INVALID_REQUEST,
+                        "session/cancel must be sent as a notification",
+                        None,
                     ),
-                )?;
+                ))?;
                 return Ok(LoopControl::Continue);
             }
 
@@ -546,17 +512,14 @@ where
         }
         other => {
             if request.id.is_some() {
-                write_message(
-                    output,
-                    &error_response(
-                        request.id,
-                        RpcError::new(
-                            METHOD_NOT_FOUND,
-                            format!("unsupported ACP method: {other}"),
-                            None,
-                        ),
+                send(&error_response(
+                    request.id,
+                    RpcError::new(
+                        METHOD_NOT_FOUND,
+                        format!("unsupported ACP method: {other}"),
+                        None,
                     ),
-                )?;
+                ))?;
             } else {
                 log_line(log, &format!("ignored unsupported ACP notification: {other}"))?;
             }
@@ -566,13 +529,45 @@ where
     Ok(LoopControl::Continue)
 }
 
-fn write_message<W: Write>(output: &mut W, value: &Value) -> Result<()> {
+fn write_message<W: Write>(config: &ServeConfig, output: &mut W, value: &Value) -> Result<()> {
+    trace_json_frame(config, "out", value)?;
     serde_json::to_writer(&mut *output, value).context("failed to write ACP response")?;
     output
         .write_all(b"\n")
         .context("failed to terminate ACP response")?;
     output.flush().context("failed to flush ACP response")?;
     Ok(())
+}
+
+fn trace_raw_frame(config: &ServeConfig, direction: &str, payload: &str) -> Result<()> {
+    let Some(path) = config.debug_trace_path.as_ref() else {
+        return Ok(());
+    };
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create ACP debug trace dir {}", parent.display()))?;
+    }
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .with_context(|| format!("failed to open ACP debug trace {}", path.display()))?;
+    writeln!(file, "[{}] {} {}", unix_timestamp_ms(), direction, payload)
+        .with_context(|| format!("failed to write ACP debug trace {}", path.display()))?;
+    file.flush()
+        .with_context(|| format!("failed to flush ACP debug trace {}", path.display()))?;
+    Ok(())
+}
+
+fn trace_json_frame(config: &ServeConfig, direction: &str, value: &Value) -> Result<()> {
+    trace_raw_frame(config, direction, &serde_json::to_string(value)?)
+}
+
+fn unix_timestamp_ms() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
 }
 
 fn decode_params<T>(params: Option<Value>, method: &str) -> Result<T>
@@ -748,17 +743,18 @@ where
                     ),
                 )?;
                 write_message(
+                    config,
                     output,
                     &success_response(
-                        active.request_id.clone(),
-                        json!({
-                            "stopReason": match outcome.stop_reason {
-                                super::session::ChildRuntimeStopReason::EndTurn => "end_turn",
-                                super::session::ChildRuntimeStopReason::Cancelled => "cancelled",
-                            },
-                            "userMessageId": outcome.message_id,
-                        }),
-                    ),
+                    active.request_id.clone(),
+                    json!({
+                        "stopReason": match outcome.stop_reason {
+                            super::session::ChildRuntimeStopReason::EndTurn => "end_turn",
+                            super::session::ChildRuntimeStopReason::Cancelled => "cancelled",
+                        },
+                        "userMessageId": outcome.message_id,
+                    }),
+                ),
                 )?;
                 let finished = state.active_prompt.take().expect("active prompt missing");
                 let _ = finished.worker.join();
@@ -777,6 +773,7 @@ where
                 )?;
                 record_session_log(config, log, &active.session_id, "ACP prompt worker failed")?;
                 write_message(
+                    config,
                     output,
                     &error_response(
                         Some(active.request_id.clone()),
@@ -809,6 +806,7 @@ where
                     "ACP prompt worker disconnected unexpectedly",
                 )?;
                 write_message(
+                    config,
                     output,
                     &error_response(
                         Some(active.request_id.clone()),
@@ -840,6 +838,7 @@ where
 {
     let payload = update_payload(update);
     write_message(
+        config,
         output,
         &notification(
             "session/update",
@@ -974,9 +973,15 @@ mod tests {
     use crate::acp::adapters::AgentKind;
     use crate::acp::session::ChildRuntimeUpdate;
     use serde_json::Value;
+    use std::fs;
     use std::io::Cursor;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     fn run_server(input: &str) -> (Vec<Value>, String) {
+        run_server_with_trace(input, None)
+    }
+
+    fn run_server_with_trace(input: &str, debug_trace_path: Option<std::path::PathBuf>) -> (Vec<Value>, String) {
         let mut output = Vec::new();
         let mut log = Vec::new();
 
@@ -986,6 +991,7 @@ mod tests {
                 workspace: None,
                 paths: None,
                 runtime_mode: RuntimeMode::InProcessMock,
+                debug_trace_path,
             },
             Cursor::new(input.as_bytes().to_vec()),
             &mut output,
@@ -1019,6 +1025,29 @@ mod tests {
             false
         );
         assert_eq!(messages[0]["result"]["agentInfo"]["name"], "opengateway");
+    }
+
+    #[test]
+    fn hidden_debug_trace_records_inbound_and_outbound_frames() {
+        let trace_path = std::env::temp_dir().join(format!(
+            "opengateway-acp-trace-{}.log",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ));
+
+        let _ = run_server_with_trace(
+            "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}\n",
+            Some(trace_path.clone()),
+        );
+
+        let trace = fs::read_to_string(&trace_path).expect("trace should exist");
+        assert!(trace.contains(" in {\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}"));
+        assert!(trace.contains(" out {"));
+        assert!(trace.contains("\"id\":1"));
+
+        let _ = fs::remove_file(trace_path);
     }
 
     #[test]

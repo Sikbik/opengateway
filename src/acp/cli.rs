@@ -4,8 +4,10 @@ use super::doctor;
 use super::supervisor::RuntimeMode;
 use super::transport::{serve_stdio, ServeConfig};
 use anyhow::{Context, Result};
-use clap::{Args, Subcommand};
+use clap::{Args, Subcommand, ValueEnum};
+use serde_json::json;
 use std::env;
+use std::fs;
 use std::io::{stdin, stdout, BufReader};
 use std::path::{Path, PathBuf};
 
@@ -22,6 +24,7 @@ pub enum AcpCommand {
     Doctor(AcpDoctorArgs),
     Sessions(AcpSessionsArgs),
     Inspect(AcpInspectArgs),
+    Export(AcpExportArgs),
     Snapshot(AcpSnapshotArgs),
 }
 
@@ -31,6 +34,8 @@ pub struct AcpServeArgs {
     pub agent: AgentKind,
     #[arg(long)]
     pub workspace: Option<PathBuf>,
+    #[arg(long, hide = true)]
+    pub debug_trace: Option<PathBuf>,
 }
 
 #[derive(Debug, Args, Default)]
@@ -49,12 +54,30 @@ pub struct AcpInspectArgs {
 #[derive(Debug, Args, Default)]
 pub struct AcpSnapshotArgs {}
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq, ValueEnum)]
+pub enum AcpExportFormat {
+    Json,
+    Markdown,
+}
+
+#[derive(Debug, Args)]
+pub struct AcpExportArgs {
+    pub session_id: String,
+    #[arg(long, value_enum, default_value = "markdown")]
+    pub format: AcpExportFormat,
+    #[arg(long)]
+    pub output: Option<PathBuf>,
+    #[arg(long, default_value_t = 200)]
+    pub limit: usize,
+}
+
 pub fn command_acp(args: AcpArgs) -> Result<()> {
     match args.command {
         AcpCommand::Serve(args) => command_serve(args),
         AcpCommand::Doctor(_) => command_doctor(),
         AcpCommand::Sessions(_) => command_sessions(),
         AcpCommand::Inspect(args) => command_inspect(args),
+        AcpCommand::Export(args) => command_export(args),
         AcpCommand::Snapshot(_) => command_snapshot(),
     }
 }
@@ -94,6 +117,7 @@ fn command_serve(args: AcpServeArgs) -> Result<()> {
             workspace,
             paths: Some(paths.clone()),
             runtime_mode: RuntimeMode::Subprocess,
+            debug_trace_path: args.debug_trace.map(|path| expand_user_path(&path)),
         },
         BufReader::new(stdin),
         &mut stdout.lock(),
@@ -219,6 +243,120 @@ fn command_snapshot() -> Result<()> {
     let snapshot = super::snapshot::build_snapshot(&paths)?;
     println!("{}", serde_json::to_string_pretty(&snapshot)?);
     Ok(())
+}
+
+fn command_export(args: AcpExportArgs) -> Result<()> {
+    let paths = crate::paths::build_paths()?;
+    paths.ensure_runtime_dirs()?;
+    let detail = super::journal::inspect_session(&paths, &args.session_id, args.limit)?
+        .ok_or_else(|| anyhow::anyhow!("unknown ACP session: {}", args.session_id))?;
+
+    let rendered = match args.format {
+        AcpExportFormat::Json => serde_json::to_string_pretty(&json!({
+            "summary": detail.summary,
+            "metrics": detail.metrics,
+            "recentEvents": detail.recent_events,
+            "recentLogs": detail.recent_logs,
+        }))?,
+        AcpExportFormat::Markdown => render_session_markdown(&detail),
+    };
+
+    if let Some(path) = args.output.as_ref() {
+        let output_path = expand_user_path(path);
+        if let Some(parent) = output_path.parent() {
+            fs::create_dir_all(parent).with_context(|| {
+                format!("failed to create output directory {}", parent.display())
+            })?;
+        }
+        fs::write(&output_path, format!("{rendered}\n"))
+            .with_context(|| format!("failed to write {}", output_path.display()))?;
+        println!("wrote {}", output_path.display());
+        return Ok(());
+    }
+
+    println!("{rendered}");
+    Ok(())
+}
+
+fn render_session_markdown(detail: &super::journal::SessionDetail) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("# ACP Session {}\n\n", detail.summary.session_id));
+    out.push_str("## Summary\n\n");
+    out.push_str(&format!(
+        "- Agent: {}\n",
+        detail.summary.agent_kind.as_deref().unwrap_or("unknown")
+    ));
+    out.push_str(&format!(
+        "- Model: {}\n",
+        detail.summary.selected_model.as_deref().unwrap_or("default")
+    ));
+    out.push_str(&format!("- State: {}\n", detail.summary.state));
+    out.push_str(&format!(
+        "- Working directory: {}\n",
+        detail.summary.cwd.as_deref().unwrap_or("unknown")
+    ));
+    out.push_str(&format!("- Prompts: {}\n", detail.summary.prompt_count));
+    out.push_str(&format!(
+        "- Last event: {}\n",
+        detail.summary.last_event.as_deref().unwrap_or("unknown")
+    ));
+    out.push_str(&format!(
+        "- Journal: {}\n",
+        detail.summary.journal_path.display()
+    ));
+    out.push_str(&format!("- Log: {}\n\n", detail.summary.log_path.display()));
+
+    out.push_str("## Metrics\n\n");
+    out.push_str(&format!(
+        "- Sessions created: {}\n",
+        detail.metrics.sessions_created
+    ));
+    out.push_str(&format!(
+        "- Prompts completed: {}\n",
+        detail.metrics.prompts_completed
+    ));
+    out.push_str(&format!(
+        "- Prompts cancelled: {}\n",
+        detail.metrics.prompts_cancelled
+    ));
+    out.push_str(&format!(
+        "- Runtime failures: {}\n\n",
+        detail.metrics.runtime_failures
+    ));
+
+    out.push_str("## Recent Events\n\n");
+    if detail.recent_events.is_empty() {
+        out.push_str("- None\n\n");
+    } else {
+        for event in &detail.recent_events {
+            out.push_str(&format!(
+                "- `{}` `{}`\n",
+                event
+                    .timestamp_ms
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "unknown".to_string()),
+                event.event.as_deref().unwrap_or("unknown")
+            ));
+            out.push_str("  ```json\n");
+            out.push_str(&serde_json::to_string_pretty(&event.data).unwrap_or_else(|_| "null".to_string()));
+            out.push_str("\n  ```\n");
+        }
+        out.push('\n');
+    }
+
+    out.push_str("## Recent Log Lines\n\n");
+    if detail.recent_logs.is_empty() {
+        out.push_str("```text\n(no recent ACP log lines)\n```\n");
+    } else {
+        out.push_str("```text\n");
+        for line in &detail.recent_logs {
+            out.push_str(line);
+            out.push('\n');
+        }
+        out.push_str("```\n");
+    }
+
+    out
 }
 
 fn resolve_workspace(path: &Path) -> Result<PathBuf> {

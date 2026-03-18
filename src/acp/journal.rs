@@ -30,7 +30,7 @@ pub struct SessionSummary {
     pub last_timestamp_ms: Option<u128>,
 }
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq, Serialize)]
 pub struct SessionEventRecord {
     pub timestamp_ms: Option<u128>,
     pub event: Option<String>,
@@ -54,7 +54,7 @@ pub struct SessionIssueSummary {
     pub message: String,
 }
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq, Serialize)]
 pub struct SessionDetail {
     pub summary: SessionSummary,
     pub metrics: AcpMetricsSummary,

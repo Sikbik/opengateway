@@ -1,16 +1,19 @@
 use anyhow::{anyhow, Context, Result};
 use serde::Serialize;
 use serde_json::Value;
+use std::collections::{HashMap, VecDeque};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::paths::{build_factory_paths, build_paths};
 
 const GATEWAY_URL: &str = "http://127.0.0.1:42069";
 const WORKSPACE_DROIDS_RELATIVE: &str = ".factory/droids";
+const ACP_DETAIL_CACHE_CAPACITY: usize = 24;
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -24,7 +27,7 @@ pub struct AppSnapshot {
     droids: Vec<DroidRecord>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AcpGuiSnapshot {
     experimental: bool,
@@ -90,7 +93,7 @@ pub struct MissionModels {
     validation_worker: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AcpGuiMetrics {
     sessions_created: usize,
@@ -99,7 +102,7 @@ pub struct AcpGuiMetrics {
     runtime_failures: usize,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AcpGuiAgent {
     kind: String,
@@ -110,7 +113,7 @@ pub struct AcpGuiAgent {
     guidance: Vec<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AcpGuiSession {
     session_id: String,
@@ -126,7 +129,7 @@ pub struct AcpGuiSession {
     log_path: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AcpGuiSessionDetail {
     summary: AcpGuiSession,
@@ -135,7 +138,7 @@ pub struct AcpGuiSessionDetail {
     recent_logs: Vec<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AcpGuiSessionEvent {
     timestamp_ms: Option<i64>,
@@ -143,7 +146,7 @@ pub struct AcpGuiSessionEvent {
     data_preview: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AcpGuiIssue {
     scope: String,
@@ -183,6 +186,28 @@ pub struct CommandResult {
     success: bool,
     output: String,
 }
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+struct FileStamp {
+    modified_ms: Option<u128>,
+    len: Option<u64>,
+}
+
+#[derive(Debug, Clone)]
+struct AcpSessionDetailCacheEntry {
+    limit: usize,
+    journal_stamp: FileStamp,
+    log_stamp: FileStamp,
+    detail: AcpGuiSessionDetail,
+}
+
+#[derive(Debug, Default)]
+struct AcpSessionDetailCache {
+    entries: HashMap<String, AcpSessionDetailCacheEntry>,
+    order: VecDeque<String>,
+}
+
+static ACP_SESSION_DETAIL_CACHE: OnceLock<Mutex<AcpSessionDetailCache>> = OnceLock::new();
 
 pub fn print_snapshot_json() -> Result<()> {
     let snapshot = load_snapshot()?;
@@ -328,10 +353,28 @@ fn load_acp_snapshot() -> Result<AcpGuiSnapshot> {
 fn load_acp_session_detail(session_id: &str, limit: usize) -> Result<AcpGuiSessionDetail> {
     let paths = build_paths()?;
     paths.ensure_runtime_dirs()?;
+    let files = crate::acp::journal::session_files(&paths, session_id);
+    if !files.journal_path.is_file() {
+        acp_session_detail_cache()
+            .lock()
+            .expect("ACP GUI session detail cache mutex poisoned")
+            .remove(session_id, limit);
+        return Err(anyhow!("unknown ACP session: {session_id}"));
+    }
+    let journal_stamp = file_stamp(&files.journal_path);
+    let log_stamp = file_stamp(&files.log_path);
+    if let Some(detail) = acp_session_detail_cache()
+        .lock()
+        .expect("ACP GUI session detail cache mutex poisoned")
+        .get(session_id, limit, journal_stamp, log_stamp)
+    {
+        return Ok(detail);
+    }
+
     let detail = crate::acp::journal::inspect_session(&paths, session_id, limit)?
         .ok_or_else(|| anyhow!("unknown ACP session: {session_id}"))?;
 
-    Ok(AcpGuiSessionDetail {
+    let detail = AcpGuiSessionDetail {
         summary: AcpGuiSession {
             session_id: detail.summary.session_id,
             agent_kind: detail.summary.agent_kind,
@@ -361,7 +404,12 @@ fn load_acp_session_detail(session_id: &str, limit: usize) -> Result<AcpGuiSessi
             })
             .collect(),
         recent_logs: detail.recent_logs,
-    })
+    };
+    acp_session_detail_cache()
+        .lock()
+        .expect("ACP GUI session detail cache mutex poisoned")
+        .insert(session_id.to_string(), limit, journal_stamp, log_stamp, detail.clone());
+    Ok(detail)
 }
 
 fn summarize_event_data(value: &Value) -> String {
@@ -371,6 +419,88 @@ fn summarize_event_data(value: &Value) -> String {
         compact
     } else {
         format!("{}...", &compact[..MAX_LEN])
+    }
+}
+
+fn acp_session_detail_cache() -> &'static Mutex<AcpSessionDetailCache> {
+    ACP_SESSION_DETAIL_CACHE.get_or_init(|| Mutex::new(AcpSessionDetailCache::default()))
+}
+
+fn file_stamp(path: &Path) -> FileStamp {
+    let Ok(metadata) = fs::metadata(path) else {
+        return FileStamp {
+            modified_ms: None,
+            len: None,
+        };
+    };
+
+    FileStamp {
+        modified_ms: metadata
+            .modified()
+            .ok()
+            .and_then(system_time_to_millis),
+        len: Some(metadata.len()),
+    }
+}
+
+fn system_time_to_millis(value: SystemTime) -> Option<u128> {
+    value.duration_since(UNIX_EPOCH).ok().map(|value| value.as_millis())
+}
+
+impl AcpSessionDetailCache {
+    fn get(
+        &mut self,
+        session_id: &str,
+        limit: usize,
+        journal_stamp: FileStamp,
+        log_stamp: FileStamp,
+    ) -> Option<AcpGuiSessionDetail> {
+        let entry = self.entries.get(session_id)?;
+        if entry.limit != limit
+            || entry.journal_stamp != journal_stamp
+            || entry.log_stamp != log_stamp
+        {
+            return None;
+        }
+
+        let detail = entry.detail.clone();
+        self.touch(session_id);
+        Some(detail)
+    }
+
+    fn insert(
+        &mut self,
+        session_id: String,
+        limit: usize,
+        journal_stamp: FileStamp,
+        log_stamp: FileStamp,
+        detail: AcpGuiSessionDetail,
+    ) {
+        self.entries.insert(
+            session_id.clone(),
+            AcpSessionDetailCacheEntry {
+                limit,
+                journal_stamp,
+                log_stamp,
+                detail,
+            },
+        );
+        self.touch(&session_id);
+        while self.order.len() > ACP_DETAIL_CACHE_CAPACITY {
+            if let Some(evicted) = self.order.pop_front() {
+                self.entries.remove(&evicted);
+            }
+        }
+    }
+
+    fn remove(&mut self, session_id: &str, _limit: usize) {
+        self.entries.remove(session_id);
+        self.order.retain(|value| value != session_id);
+    }
+
+    fn touch(&mut self, session_id: &str) {
+        self.order.retain(|value| value != session_id);
+        self.order.push_back(session_id.to_string());
     }
 }
 
