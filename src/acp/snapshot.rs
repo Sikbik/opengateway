@@ -1,6 +1,9 @@
 use super::adapters::{codex, supported_agents, AgentKind};
 use super::capabilities::{planned_capabilities, PlannedCapabilities};
-use super::journal::{collect_metrics_summary, collect_session_summaries, AcpMetricsSummary, SessionSummary};
+use super::journal::{
+    collect_metrics_summary, collect_recent_session_issues, collect_session_summaries,
+    AcpMetricsSummary, SessionIssueSummary, SessionSummary,
+};
 use super::protocol::JSONRPC_VERSION;
 use super::supervisor::PROCESS_MODEL;
 use super::transport::TRANSPORT_NAME;
@@ -20,6 +23,7 @@ pub struct AcpSnapshot {
     pub metrics: AcpMetricsSummary,
     pub recorded_session_count: usize,
     pub agents: Vec<AcpAgentSnapshot>,
+    pub issues: Vec<AcpIssueSnapshot>,
     pub sessions: Vec<SessionSummary>,
 }
 
@@ -53,6 +57,21 @@ pub struct AcpAgentSnapshot {
     pub supports_skip_git_repo_check: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub supports_cwd_flag: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AcpIssueSnapshot {
+    pub scope: &'static str,
+    pub label: String,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timestamp_ms: Option<u128>,
 }
 
 pub fn build_snapshot(paths: &AppPaths) -> Result<AcpSnapshot> {
@@ -100,6 +119,23 @@ pub fn build_snapshot(paths: &AppPaths) -> Result<AcpSnapshot> {
             },
         })
         .collect();
+    let mut issues = Vec::new();
+    if let Some(issue) = codex_runtime.issue.clone() {
+        issues.push(AcpIssueSnapshot {
+            scope: "adapter",
+            label: "codex".to_string(),
+            message: issue,
+            session_id: None,
+            agent_kind: Some("codex".to_string()),
+            cwd: None,
+            timestamp_ms: None,
+        });
+    }
+    issues.extend(
+        collect_recent_session_issues(paths, 6)?
+            .into_iter()
+            .map(map_session_issue),
+    );
 
     Ok(AcpSnapshot {
         experimental: true,
@@ -117,8 +153,21 @@ pub fn build_snapshot(paths: &AppPaths) -> Result<AcpSnapshot> {
         metrics,
         recorded_session_count: sessions.len(),
         agents,
+        issues,
         sessions,
     })
+}
+
+fn map_session_issue(issue: SessionIssueSummary) -> AcpIssueSnapshot {
+    AcpIssueSnapshot {
+        scope: "session",
+        label: issue.session_id.clone(),
+        message: issue.message,
+        session_id: Some(issue.session_id),
+        agent_kind: issue.agent_kind,
+        cwd: issue.cwd,
+        timestamp_ms: issue.timestamp_ms,
+    }
 }
 
 #[cfg(test)]

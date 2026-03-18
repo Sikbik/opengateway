@@ -18,8 +18,11 @@ pub struct SessionFiles {
 #[derive(Debug, Clone, Eq, PartialEq, Serialize)]
 pub struct SessionSummary {
     pub session_id: String,
+    pub agent_kind: Option<String>,
     pub prompt_count: usize,
     pub cwd: Option<String>,
+    pub state: String,
+    pub started_timestamp_ms: Option<u128>,
     pub last_event: Option<String>,
     pub journal_path: PathBuf,
     pub log_path: PathBuf,
@@ -39,6 +42,15 @@ pub struct AcpMetricsSummary {
     pub prompts_completed: usize,
     pub prompts_cancelled: usize,
     pub runtime_failures: usize,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize)]
+pub struct SessionIssueSummary {
+    pub session_id: String,
+    pub agent_kind: Option<String>,
+    pub cwd: Option<String>,
+    pub timestamp_ms: Option<u128>,
+    pub message: String,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -81,8 +93,11 @@ pub fn collect_session_summaries(paths: &AppPaths) -> Result<Vec<SessionSummary>
         let files = session_files(paths, stem);
         let mut summary = SessionSummary {
             session_id: stem.to_string(),
+            agent_kind: None,
             prompt_count: 0,
             cwd: None,
+            state: "unknown".to_string(),
+            started_timestamp_ms: None,
             last_event: None,
             journal_path: files.journal_path,
             log_path: files.log_path,
@@ -95,6 +110,9 @@ pub fn collect_session_summaries(paths: &AppPaths) -> Result<Vec<SessionSummary>
             let value: Value = serde_json::from_str(line)
                 .with_context(|| format!("invalid ACP journal line in {}", summary.journal_path.display()))?;
             if let Some(ts) = value.get("ts").and_then(Value::as_u64) {
+                if summary.started_timestamp_ms.is_none() {
+                    summary.started_timestamp_ms = Some(ts as u128);
+                }
                 summary.last_timestamp_ms = Some(ts as u128);
             }
             if let Some(event) = value.get("event").and_then(Value::as_str) {
@@ -110,7 +128,15 @@ pub fn collect_session_summaries(paths: &AppPaths) -> Result<Vec<SessionSummary>
                     .and_then(Value::as_str)
                     .map(str::to_string);
             }
+            if summary.agent_kind.is_none() {
+                summary.agent_kind = value
+                    .get("data")
+                    .and_then(|data| data.get("agent"))
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
+            }
         }
+        summary.state = summarize_session_state(summary.last_event.as_deref()).to_string();
 
         sessions.push(summary);
     }
@@ -187,6 +213,40 @@ pub fn inspect_session(
         recent_events: tail_event_records(events, limit),
         recent_logs: logs,
     }))
+}
+
+pub fn collect_recent_session_issues(
+    paths: &AppPaths,
+    limit: usize,
+) -> Result<Vec<SessionIssueSummary>> {
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+
+    let mut issues = Vec::new();
+    for summary in collect_session_summaries(paths)? {
+        for record in read_session_events(&summary.journal_path)? {
+            if record.event.as_deref() != Some("session.runtime_failed") {
+                continue;
+            }
+            issues.push(SessionIssueSummary {
+                session_id: summary.session_id.clone(),
+                agent_kind: summary.agent_kind.clone(),
+                cwd: summary.cwd.clone(),
+                timestamp_ms: record.timestamp_ms,
+                message: runtime_issue_message(&record.data),
+            });
+        }
+    }
+
+    issues.sort_by_key(|issue| {
+        Reverse((
+            issue.timestamp_ms.unwrap_or_default(),
+            issue.session_id.clone(),
+        ))
+    });
+    issues.truncate(limit);
+    Ok(issues)
 }
 
 pub fn append_journal_event(
@@ -324,6 +384,29 @@ fn parse_event_record(path: &Path, line: &str) -> Result<SessionEventRecord> {
     })
 }
 
+fn summarize_session_state(last_event: Option<&str>) -> &'static str {
+    match last_event {
+        Some("session.created") => "starting",
+        Some("session.cancel_requested") => "cancelling",
+        Some("session.runtime_failed") => "failed",
+        Some(event) if event.starts_with("prompt.") => "running",
+        Some(_) => "idle",
+        None => "unknown",
+    }
+}
+
+fn runtime_issue_message(data: &Value) -> String {
+    if let Some(detail) = data.get("detail").and_then(Value::as_str) {
+        return detail.to_string();
+    }
+
+    if let Some(reason) = data.get("reason").and_then(Value::as_str) {
+        return format!("ACP runtime failed ({reason})");
+    }
+
+    "ACP session runtime failed".to_string()
+}
+
 fn unix_timestamp_ms() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -334,8 +417,9 @@ fn unix_timestamp_ms() -> u128 {
 #[cfg(test)]
 mod tests {
     use super::{
-        append_journal_event, append_session_log, collect_metrics_summary, collect_session_summaries,
-        highest_session_sequence, inspect_session, parse_session_sequence, session_files, tail_lines,
+        append_journal_event, append_session_log, collect_metrics_summary,
+        collect_recent_session_issues, collect_session_summaries, highest_session_sequence,
+        inspect_session, parse_session_sequence, session_files, tail_lines,
     };
     use crate::paths::build_paths;
     use serde_json::json;
@@ -367,7 +451,12 @@ mod tests {
         fs::create_dir_all(&paths.acp_sessions_dir).expect("sessions dir");
         fs::create_dir_all(&paths.acp_logs_dir).expect("logs dir");
 
-        append_journal_event(&paths, "session-1", "session.created", json!({"cwd": "/tmp"}))
+        append_journal_event(
+            &paths,
+            "session-1",
+            "session.created",
+            json!({"agent": "codex", "cwd": "/tmp"}),
+        )
             .expect("journal event");
         append_session_log(&paths, "session-1", "session created").expect("session log");
 
@@ -398,7 +487,12 @@ mod tests {
         fs::create_dir_all(&paths.acp_sessions_dir).expect("sessions dir");
         fs::create_dir_all(&paths.acp_logs_dir).expect("logs dir");
 
-        append_journal_event(&paths, "session-1", "session.created", json!({"cwd": "/tmp"}))
+        append_journal_event(
+            &paths,
+            "session-1",
+            "session.created",
+            json!({"agent": "codex", "cwd": "/tmp"}),
+        )
             .expect("journal event");
         append_journal_event(
             &paths,
@@ -411,8 +505,11 @@ mod tests {
         let summaries = collect_session_summaries(&paths).expect("summaries");
         assert_eq!(summaries.len(), 1);
         assert_eq!(summaries[0].session_id, "session-1");
+        assert_eq!(summaries[0].agent_kind.as_deref(), Some("codex"));
         assert_eq!(summaries[0].prompt_count, 1);
         assert_eq!(summaries[0].cwd.as_deref(), Some("/tmp"));
+        assert_eq!(summaries[0].state, "running");
+        assert!(summaries[0].started_timestamp_ms.is_some());
         assert_eq!(summaries[0].last_event.as_deref(), Some("prompt.completed"));
 
         let _ = fs::remove_dir_all(test_root);
@@ -455,6 +552,48 @@ mod tests {
         );
         assert_eq!(detail.recent_logs.len(), 1);
         assert!(detail.recent_logs[0].contains("line two"));
+
+        let _ = fs::remove_dir_all(test_root);
+    }
+
+    #[test]
+    fn collect_recent_session_issues_reads_runtime_failures() {
+        let mut paths = build_paths().expect("paths");
+        let test_root = std::env::temp_dir().join(format!(
+            "opengateway-acp-issues-test-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ));
+        paths.acp_dir = test_root.clone();
+        paths.acp_sessions_dir = test_root.join("sessions");
+        paths.acp_logs_dir = test_root.join("logs");
+        paths.acp_tmp_dir = test_root.join("tmp");
+        fs::create_dir_all(&paths.acp_sessions_dir).expect("sessions dir");
+        fs::create_dir_all(&paths.acp_logs_dir).expect("logs dir");
+
+        append_journal_event(
+            &paths,
+            "session-1",
+            "session.created",
+            json!({"agent": "codex", "cwd": "/tmp"}),
+        )
+        .expect("journal event");
+        append_journal_event(
+            &paths,
+            "session-1",
+            "session.runtime_failed",
+            json!({"reason": "worker_failed", "detail": "codex child exited"}),
+        )
+        .expect("runtime failure");
+
+        let issues = collect_recent_session_issues(&paths, 10).expect("issues");
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].session_id, "session-1");
+        assert_eq!(issues[0].agent_kind.as_deref(), Some("codex"));
+        assert_eq!(issues[0].cwd.as_deref(), Some("/tmp"));
+        assert_eq!(issues[0].message, "codex child exited");
 
         let _ = fs::remove_dir_all(test_root);
     }

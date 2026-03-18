@@ -81,6 +81,7 @@ export interface AcpGuiSnapshot {
   processModel: string;
   metrics: AcpGuiMetrics;
   agents: AcpGuiAgent[];
+  issues: AcpGuiIssue[];
   sessions: AcpGuiSession[];
 }
 
@@ -102,8 +103,11 @@ export interface AcpGuiAgent {
 
 export interface AcpGuiSession {
   sessionId: string;
+  agentKind: string | null;
+  state: string;
   promptCount: number;
   cwd: string | null;
+  startedTimestampMs: number | null;
   lastEvent: string | null;
   lastTimestampMs: number | null;
   journalPath: string;
@@ -121,4 +125,14 @@ export interface AcpGuiSessionEvent {
   timestampMs: number | null;
   event: string | null;
   dataPreview: string;
+}
+
+export interface AcpGuiIssue {
+  scope: string;
+  label: string;
+  message: string;
+  sessionId: string | null;
+  agentKind: string | null;
+  cwd: string | null;
+  timestampMs: number | null;
 }

@@ -33,6 +33,7 @@ pub struct AcpGuiSnapshot {
     process_model: String,
     metrics: AcpGuiMetrics,
     agents: Vec<AcpGuiAgent>,
+    issues: Vec<AcpGuiIssue>,
     sessions: Vec<AcpGuiSession>,
 }
 
@@ -113,8 +114,11 @@ pub struct AcpGuiAgent {
 #[serde(rename_all = "camelCase")]
 pub struct AcpGuiSession {
     session_id: String,
+    agent_kind: Option<String>,
+    state: String,
     prompt_count: usize,
     cwd: Option<String>,
+    started_timestamp_ms: Option<i64>,
     last_event: Option<String>,
     last_timestamp_ms: Option<i64>,
     journal_path: String,
@@ -136,6 +140,18 @@ pub struct AcpGuiSessionEvent {
     timestamp_ms: Option<i64>,
     event: Option<String>,
     data_preview: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AcpGuiIssue {
+    scope: String,
+    label: String,
+    message: String,
+    session_id: Option<String>,
+    agent_kind: Option<String>,
+    cwd: Option<String>,
+    timestamp_ms: Option<i64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -271,13 +287,29 @@ fn load_acp_snapshot() -> Result<AcpGuiSnapshot> {
                 guidance: agent.guidance,
             })
             .collect(),
+        issues: snapshot
+            .issues
+            .into_iter()
+            .map(|issue| AcpGuiIssue {
+                scope: issue.scope.to_string(),
+                label: issue.label,
+                message: issue.message,
+                session_id: issue.session_id,
+                agent_kind: issue.agent_kind,
+                cwd: issue.cwd,
+                timestamp_ms: issue.timestamp_ms.map(|value| value as i64),
+            })
+            .collect(),
         sessions: snapshot
             .sessions
             .into_iter()
             .map(|session| AcpGuiSession {
                 session_id: session.session_id,
+                agent_kind: session.agent_kind,
+                state: session.state,
                 prompt_count: session.prompt_count,
                 cwd: session.cwd,
+                started_timestamp_ms: session.started_timestamp_ms.map(|value| value as i64),
                 last_event: session.last_event,
                 last_timestamp_ms: session.last_timestamp_ms.map(|value| value as i64),
                 journal_path: session.journal_path.display().to_string(),
@@ -296,8 +328,11 @@ fn load_acp_session_detail(session_id: &str, limit: usize) -> Result<AcpGuiSessi
     Ok(AcpGuiSessionDetail {
         summary: AcpGuiSession {
             session_id: detail.summary.session_id,
+            agent_kind: detail.summary.agent_kind,
+            state: detail.summary.state,
             prompt_count: detail.summary.prompt_count,
             cwd: detail.summary.cwd,
+            started_timestamp_ms: detail.summary.started_timestamp_ms.map(|value| value as i64),
             last_event: detail.summary.last_event,
             last_timestamp_ms: detail.summary.last_timestamp_ms.map(|value| value as i64),
             journal_path: detail.summary.journal_path.display().to_string(),

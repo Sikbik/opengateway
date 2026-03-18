@@ -702,6 +702,7 @@ pre {
 
 .acp-stage,
 .acp-adapters,
+.acp-issues,
 .acp-sessions {
   display: grid;
   gap: 12px;
@@ -726,6 +727,62 @@ pre {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 10px;
+}
+
+.acp-issues__list {
+  display: grid;
+  gap: 10px;
+}
+
+.acp-issue-card {
+  display: grid;
+  gap: 10px;
+  padding: 14px;
+  border-radius: 16px;
+  border: 1px solid rgba(255, 126, 131, 0.14);
+  background:
+    linear-gradient(180deg, rgba(255, 126, 131, 0.05), rgba(5, 11, 23, 0.72)),
+    rgba(6, 12, 25, 0.56);
+}
+
+.acp-issue-card__head {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 10px;
+  align-items: center;
+}
+
+.acp-issue-card__title {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.acp-issue-card__title strong {
+  font-size: 0.9rem;
+}
+
+.acp-issue-card__time {
+  color: var(--muted);
+  font-size: 0.76rem;
+}
+
+.acp-issue-card__message {
+  margin: 0;
+  color: #ffe7e8;
+  font-size: 0.84rem;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.acp-issue-card__facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 10px;
+  color: var(--muted);
+  font-size: 0.76rem;
 }
 
 .acp-adapter-card {
@@ -1193,6 +1250,7 @@ pre {
 }
 
 .health-pill--offline,
+.chip--flagged,
 .chip--builtin,
 .chip--missing {
   background: rgba(255, 126, 131, 0.12);
