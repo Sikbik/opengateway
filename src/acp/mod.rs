@@ -4,6 +4,7 @@ pub mod cli;
 pub mod doctor;
 pub mod journal;
 pub mod redact;
+pub mod snapshot;
 pub use adapters::codex::{command_codex_runtime, CodexRuntimeArgs};
 pub use supervisor::{command_mock_runtime, MockRuntimeArgs};
 

@@ -4,6 +4,7 @@ use crate::acp::session::{
 };
 use anyhow::{bail, Context, Result};
 use clap::Args;
+use serde::Serialize;
 use serde_json::Value;
 use std::env;
 #[cfg(windows)]
@@ -27,7 +28,7 @@ const CREATE_NO_WINDOW: u32 = 0x08000000;
 const RUNTIME_POLL_INTERVAL: Duration = Duration::from_millis(25);
 const CODEX_EXECUTABLE: &str = "codex";
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct CodexRuntimeReadiness {
     pub executable_path: Option<PathBuf>,
     pub version: Option<String>,

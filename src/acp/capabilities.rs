@@ -1,10 +1,12 @@
-#[derive(Debug, Clone, Eq, PartialEq)]
+use serde::Serialize;
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize)]
 pub struct PlannedCapabilities {
     pub initialize: bool,
     pub sessions: SessionCapabilities,
 }
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq, Serialize)]
 pub struct SessionCapabilities {
     pub new_session: bool,
     pub prompt: bool,

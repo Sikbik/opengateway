@@ -22,6 +22,7 @@ pub enum AcpCommand {
     Doctor(AcpDoctorArgs),
     Sessions(AcpSessionsArgs),
     Inspect(AcpInspectArgs),
+    Snapshot(AcpSnapshotArgs),
 }
 
 #[derive(Debug, Args)]
@@ -45,12 +46,16 @@ pub struct AcpInspectArgs {
     pub limit: usize,
 }
 
+#[derive(Debug, Args, Default)]
+pub struct AcpSnapshotArgs {}
+
 pub fn command_acp(args: AcpArgs) -> Result<()> {
     match args.command {
         AcpCommand::Serve(args) => command_serve(args),
         AcpCommand::Doctor(_) => command_doctor(),
         AcpCommand::Sessions(_) => command_sessions(),
         AcpCommand::Inspect(args) => command_inspect(args),
+        AcpCommand::Snapshot(_) => command_snapshot(),
     }
 }
 
@@ -196,6 +201,14 @@ fn command_inspect(args: AcpInspectArgs) -> Result<()> {
     Ok(())
 }
 
+fn command_snapshot() -> Result<()> {
+    let paths = crate::paths::build_paths()?;
+    paths.ensure_runtime_dirs()?;
+    let snapshot = super::snapshot::build_snapshot(&paths)?;
+    println!("{}", serde_json::to_string_pretty(&snapshot)?);
+    Ok(())
+}
+
 fn resolve_workspace(path: &Path) -> Result<PathBuf> {
     let workspace = expand_user_path(path);
     if workspace.is_dir() {
@@ -233,7 +246,9 @@ fn expand_user_path(path: &Path) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use super::{command_acp, expand_user_path, AcpArgs, AcpCommand, AcpInspectArgs};
+    use super::{
+        command_acp, expand_user_path, AcpArgs, AcpCommand, AcpInspectArgs, AcpSnapshotArgs,
+    };
     use crate::acp::journal::append_journal_event;
     use crate::paths::build_paths;
     use serde_json::json;
@@ -294,5 +309,13 @@ mod tests {
         let _ = fs::remove_dir_all(test_root);
 
         result.expect("inspect command");
+    }
+
+    #[test]
+    fn snapshot_command_succeeds() {
+        let result = command_acp(AcpArgs {
+            command: AcpCommand::Snapshot(AcpSnapshotArgs {}),
+        });
+        result.expect("snapshot command");
     }
 }

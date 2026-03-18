@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use crate::paths::AppPaths;
+use serde::Serialize;
 use serde_json::{json, Value};
 use std::cmp::Reverse;
 use std::fs;
@@ -14,7 +15,7 @@ pub struct SessionFiles {
     pub log_path: PathBuf,
 }
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq, Serialize)]
 pub struct SessionSummary {
     pub session_id: String,
     pub prompt_count: usize,
@@ -32,7 +33,7 @@ pub struct SessionEventRecord {
     pub data: Value,
 }
 
-#[derive(Debug, Clone, Default, Eq, PartialEq)]
+#[derive(Debug, Clone, Default, Eq, PartialEq, Serialize)]
 pub struct AcpMetricsSummary {
     pub sessions_created: usize,
     pub prompts_completed: usize,
