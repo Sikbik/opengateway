@@ -95,6 +95,89 @@ jobs:
           assert any(agent["kind"] == "claude" for agent in payload["agents"])
           PY
 
+      - name: Current doctor smoke
+        run: |
+          set -euo pipefail
+          cargo run --quiet -- doctor > /tmp/opengateway-doctor.txt
+          grep -F "version:" /tmp/opengateway-doctor.txt
+          grep -F "default_config:" /tmp/opengateway-doctor.txt
+          grep -F "auth_dir:" /tmp/opengateway-doctor.txt
+          grep -F "log_file:" /tmp/opengateway-doctor.txt
+
+      - name: GUI snapshot smoke
+        run: |
+          set -euo pipefail
+          cargo run --quiet -- gui-snapshot > /tmp/gui-snapshot.json
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          payload = json.loads(Path("/tmp/gui-snapshot.json").read_text())
+          assert isinstance(payload["generatedAt"], int)
+          assert payload["environment"]["preferredRuntime"] in {"browser", "desktop"}
+          assert payload["gateway"]["apiBaseUrl"].endswith("/v1")
+          assert "homePath" in payload["factory"]
+          assert isinstance(payload["models"], list)
+          assert isinstance(payload["droids"], list)
+          PY
+
+      - name: Factory sync smoke
+        run: |
+          set -euo pipefail
+          root="$(mktemp -d)"
+          config="$root/config.json"
+          settings="$root/settings.json"
+          cat >"$settings" <<'JSON'
+          {
+            "customModels": [
+              {
+                "model": "gpt-5.3-codex(xhigh)",
+                "id": "custom:GPT-5.3-Codex-(XHigh)-3",
+                "index": 3,
+                "baseUrl": "http://127.0.0.1:42069/v1",
+                "apiKey": "secret",
+                "displayName": "GPT-5.3 Codex (XHigh)",
+                "noImageSupport": false,
+                "provider": "openai"
+              }
+            ],
+            "sessionDefaultSettings": {
+              "model": "custom:GPT-5.3-Codex-(XHigh)-3",
+              "reasoningEffort": "xhigh"
+            },
+            "missionModelSettings": {
+              "orchestratorModel": "custom:GPT-5.3-Codex-(XHigh)-3",
+              "orchestratorReasoningEffort": "none",
+              "workerModel": "custom:GPT-5.3-Codex-(XHigh)-3",
+              "workerReasoningEffort": "none",
+              "validationWorkerModel": "custom:GPT-5.3-Codex-(XHigh)-3",
+              "validationWorkerReasoningEffort": "none"
+            }
+          }
+          JSON
+          export config settings
+          cargo run --quiet -- sync-factory \
+            --base-url http://127.0.0.1:42069 \
+            --api-key secret \
+            --factory-config "$config" \
+            --factory-settings "$settings" \
+            --models "gpt-5.3-codex(xhigh),gpt-5.4(xhigh)"
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          import os
+
+          config = json.loads(Path(os.environ["config"]).read_text())
+          settings = json.loads(Path(os.environ["settings"]).read_text())
+          assert len(config["custom_models"]) == 2
+          assert any(item["model"] == "gpt-5.4(xhigh)" for item in config["custom_models"])
+          custom_models = settings["customModels"]
+          preferred = next(item for item in custom_models if item["model"] == "gpt-5.4(xhigh)")
+          preferred_id = preferred["id"]
+          assert settings["sessionDefaultSettings"]["model"] == preferred_id
+          assert settings["missionModelSettings"]["workerReasoningEffort"] == "xhigh"
+          PY
+
       - name: Install GUI dependencies
         working-directory: gui
         run: npm ci
