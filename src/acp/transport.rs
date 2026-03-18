@@ -8,7 +8,7 @@ use super::protocol::{
     JSONRPC_VERSION,
 };
 use super::redact::redact_text;
-use super::session::{CancelParams, NewSessionParams, PromptParams};
+use super::session::{CancelParams, ChildRuntimeUpdate, NewSessionParams, PromptParams};
 use super::supervisor::{CancelOutcome, RuntimeMode, SessionSupervisor};
 use crate::paths::AppPaths;
 use anyhow::{Context, Result};
@@ -360,7 +360,9 @@ where
                 return Ok(LoopControl::Continue);
             }
 
-            let prompt = match state.supervisor.prompt(params.clone()) {
+            let prompt = match state.supervisor.prompt(params.clone(), |update| {
+                emit_prompt_update(config, output, log, &params.session_id, &update)
+            }) {
                 Ok(prompt) => prompt,
                 Err(error) => {
                     write_message(
@@ -377,22 +379,6 @@ where
                     return Ok(LoopControl::Continue);
                 }
             };
-            write_message(
-                output,
-                &notification(
-                    "session/update",
-                    json!({
-                        "sessionId": prompt.session_id,
-                        "update": {
-                            "sessionUpdate": "agent_message_chunk",
-                            "content": {
-                                "type": "text",
-                                "text": prompt.reply_text,
-                            }
-                        }
-                    }),
-                ),
-            )?;
             record_session_event(
                 config,
                 log,
@@ -571,10 +557,147 @@ fn record_session_log<L: Write>(
     Ok(())
 }
 
+fn emit_prompt_update<W, L>(
+    config: &ServeConfig,
+    output: &mut W,
+    log: &mut L,
+    session_id: &str,
+    update: &ChildRuntimeUpdate,
+) -> Result<()>
+where
+    W: Write,
+    L: Write,
+{
+    let payload = update_payload(update);
+    write_message(
+        output,
+        &notification(
+            "session/update",
+            json!({
+                "sessionId": session_id,
+                "update": payload,
+            }),
+        ),
+    )?;
+
+    record_session_event(config, log, session_id, update_event_name(update), payload.clone())?;
+    record_session_log(config, log, session_id, &update_log_line(update))
+}
+
+fn update_payload(update: &ChildRuntimeUpdate) -> Value {
+    match update {
+        ChildRuntimeUpdate::TurnStarted => json!({
+            "sessionUpdate": "turn_started",
+        }),
+        ChildRuntimeUpdate::TurnCompleted {
+            input_tokens,
+            output_tokens,
+        } => json!({
+            "sessionUpdate": "turn_completed",
+            "usage": {
+                "inputTokens": input_tokens,
+                "outputTokens": output_tokens,
+            }
+        }),
+        ChildRuntimeUpdate::AgentMessage { text } => json!({
+            "sessionUpdate": "agent_message_chunk",
+            "content": {
+                "type": "text",
+                "text": text,
+            }
+        }),
+        ChildRuntimeUpdate::CommandStarted { command } => json!({
+            "sessionUpdate": "tool_started",
+            "tool": "shell",
+            "title": command,
+        }),
+        ChildRuntimeUpdate::CommandCompleted {
+            command,
+            output,
+            exit_code,
+        } => {
+            let mut value = json!({
+                "sessionUpdate": "tool_completed",
+                "tool": "shell",
+                "title": command,
+                "exitCode": exit_code,
+            });
+            if let Some(command_output) = output {
+                value["content"] = json!({
+                    "type": "text",
+                    "text": command_output,
+                });
+            }
+            value
+        }
+    }
+}
+
+fn update_event_name(update: &ChildRuntimeUpdate) -> &'static str {
+    match update {
+        ChildRuntimeUpdate::TurnStarted => "prompt.turn_started",
+        ChildRuntimeUpdate::TurnCompleted { .. } => "prompt.turn_completed",
+        ChildRuntimeUpdate::AgentMessage { .. } => "prompt.agent_message",
+        ChildRuntimeUpdate::CommandStarted { .. } => "prompt.tool_started",
+        ChildRuntimeUpdate::CommandCompleted { .. } => "prompt.tool_completed",
+    }
+}
+
+fn update_log_line(update: &ChildRuntimeUpdate) -> String {
+    match update {
+        ChildRuntimeUpdate::TurnStarted => "Codex turn started".to_string(),
+        ChildRuntimeUpdate::TurnCompleted {
+            input_tokens,
+            output_tokens,
+        } => format!(
+            "Codex turn completed (input_tokens={}, output_tokens={})",
+            input_tokens
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "unknown".to_string()),
+            output_tokens
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "unknown".to_string())
+        ),
+        ChildRuntimeUpdate::AgentMessage { text } => {
+            format!("Codex agent message: {}", summarize_update_text(text))
+        }
+        ChildRuntimeUpdate::CommandStarted { command } => {
+            format!("Codex command started: {}", summarize_update_text(command))
+        }
+        ChildRuntimeUpdate::CommandCompleted {
+            command,
+            output,
+            exit_code,
+        } => format!(
+            "Codex command completed: {} (exit_code={}, output={})",
+            summarize_update_text(command),
+            exit_code
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "unknown".to_string()),
+            output
+                .as_deref()
+                .map(summarize_update_text)
+                .unwrap_or_else(|| "no output".to_string())
+        ),
+    }
+}
+
+fn summarize_update_text(text: &str) -> String {
+    const MAX_CHARS: usize = 120;
+    let trimmed = text.trim();
+    let summary = trimmed.chars().take(MAX_CHARS).collect::<String>();
+    if trimmed.chars().count() > MAX_CHARS {
+        format!("{summary}…")
+    } else {
+        summary
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{serve_stdio, RuntimeMode, ServeConfig};
+    use super::{serve_stdio, update_payload, RuntimeMode, ServeConfig};
     use crate::acp::adapters::AgentKind;
+    use crate::acp::session::ChildRuntimeUpdate;
     use serde_json::Value;
     use std::io::Cursor;
 
@@ -679,5 +802,20 @@ mod tests {
 
         assert_eq!(messages.len(), 1);
         assert!(log.contains("acp stdio server exiting after exit notification"));
+    }
+
+    #[test]
+    fn tool_completion_updates_include_shell_details() {
+        let payload = update_payload(&ChildRuntimeUpdate::CommandCompleted {
+            command: "echo hi".to_string(),
+            output: Some("hi".to_string()),
+            exit_code: Some(0),
+        });
+
+        assert_eq!(payload["sessionUpdate"], "tool_completed");
+        assert_eq!(payload["tool"], "shell");
+        assert_eq!(payload["title"], "echo hi");
+        assert_eq!(payload["exitCode"], 0);
+        assert_eq!(payload["content"]["text"], "hi");
     }
 }

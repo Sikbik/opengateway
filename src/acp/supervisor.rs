@@ -1,11 +1,10 @@
 use super::adapters::AgentKind;
 use super::session::{
-    CancelParams, ChildRuntimeRequest, ChildRuntimeResponse, InProcessMockSession, NewSessionParams,
-    PromptParams,
+    CancelParams, ChildRuntimeEnvelope, ChildRuntimeRequest, ChildRuntimeResponse,
+    ChildRuntimeUpdate, InProcessMockSession, NewSessionParams, PromptParams,
 };
 use anyhow::{anyhow, bail, Context, Result};
 use clap::{Args, ValueEnum};
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::env;
 use std::io::{BufRead, BufReader, Write};
@@ -129,7 +128,10 @@ impl SessionSupervisor {
         self.sessions.contains_key(session_id)
     }
 
-    pub fn prompt(&mut self, params: PromptParams) -> Result<PromptOutcome> {
+    pub fn prompt<F>(&mut self, params: PromptParams, mut on_update: F) -> Result<PromptOutcome>
+    where
+        F: FnMut(ChildRuntimeUpdate) -> Result<()>,
+    {
         let session_id = params.session_id.clone();
         let mut handle = self
             .sessions
@@ -139,6 +141,9 @@ impl SessionSupervisor {
         let result = match &mut handle {
             SessionHandle::InProcess(session) => {
                 let reply_text = session.build_mock_reply(&params);
+                on_update(ChildRuntimeUpdate::AgentMessage {
+                    text: reply_text.clone(),
+                })?;
                 Ok(PromptOutcome {
                     session_id: session.id.clone(),
                     reply_text,
@@ -146,7 +151,7 @@ impl SessionSupervisor {
                     message_id: params.message_id,
                 })
             }
-            SessionHandle::Process(session) => session.prompt(params),
+            SessionHandle::Process(session) => session.prompt(params, &mut on_update),
         };
 
         if result.is_ok() {
@@ -260,7 +265,10 @@ impl ProcessSession {
         })
     }
 
-    fn prompt(&mut self, params: PromptParams) -> Result<PromptOutcome> {
+    fn prompt<F>(&mut self, params: PromptParams, on_update: &mut F) -> Result<PromptOutcome>
+    where
+        F: FnMut(ChildRuntimeUpdate) -> Result<()>,
+    {
         self.ensure_alive("prompt")?;
         write_json_line(
             &mut self.stdin,
@@ -270,14 +278,19 @@ impl ProcessSession {
                 message_id: params.message_id.clone(),
             },
         )?;
-        let response: ChildRuntimeResponse = read_json_line(&mut self.stdout)?;
-
-        Ok(PromptOutcome {
-            session_id: params.session_id,
-            reply_text: response.text,
-            prompt_count: response.prompt_count,
-            message_id: params.message_id,
-        })
+        loop {
+            match read_json_line(&mut self.stdout)? {
+                ChildRuntimeEnvelope::Update { update } => on_update(update)?,
+                ChildRuntimeEnvelope::Result { result } => {
+                    return Ok(PromptOutcome {
+                        session_id: params.session_id,
+                        reply_text: result.text,
+                        prompt_count: result.prompt_count,
+                        message_id: params.message_id,
+                    });
+                }
+            }
+        }
     }
 
     fn cancel(&mut self) -> Result<()> {
@@ -362,9 +375,17 @@ pub fn command_mock_runtime(args: MockRuntimeArgs) -> Result<()> {
                 let text = session.build_mock_reply(&params);
                 write_json_line(
                     &mut stdout,
-                    &ChildRuntimeResponse {
-                        text,
-                        prompt_count: session.prompt_count,
+                    &ChildRuntimeEnvelope::Update {
+                        update: ChildRuntimeUpdate::AgentMessage { text: text.clone() },
+                    },
+                )?;
+                write_json_line(
+                    &mut stdout,
+                    &ChildRuntimeEnvelope::Result {
+                        result: ChildRuntimeResponse {
+                            text,
+                            prompt_count: session.prompt_count,
+                        },
                     },
                 )?;
             }
@@ -379,7 +400,7 @@ pub fn command_mock_runtime(args: MockRuntimeArgs) -> Result<()> {
 fn write_json_line<W, T>(writer: &mut W, value: &T) -> Result<()>
 where
     W: Write,
-    T: Serialize,
+    T: serde::Serialize,
 {
     serde_json::to_writer(&mut *writer, value).context("failed to write ACP runtime message")?;
     writer
@@ -394,7 +415,7 @@ where
 fn read_json_line<R, T>(reader: &mut R) -> Result<T>
 where
     R: BufRead,
-    T: for<'de> Deserialize<'de>,
+    T: for<'de> serde::Deserialize<'de>,
 {
     let mut line = String::new();
     if reader
@@ -455,14 +476,17 @@ mod tests {
             .expect("create");
 
         let prompt = supervisor
-            .prompt(PromptParams {
-                session_id: created.session_id.clone(),
-                prompt: vec![PromptBlock {
-                    kind: "text".to_string(),
-                    text: Some("hello".to_string()),
-                }],
-                message_id: Some("user-1".to_string()),
-            })
+            .prompt(
+                PromptParams {
+                    session_id: created.session_id.clone(),
+                    prompt: vec![PromptBlock {
+                        kind: "text".to_string(),
+                        text: Some("hello".to_string()),
+                    }],
+                    message_id: Some("user-1".to_string()),
+                },
+                |_| Ok(()),
+            )
             .expect("prompt");
         assert_eq!(prompt.prompt_count, 1);
         assert!(prompt.reply_text.contains("hello"));

@@ -43,10 +43,41 @@ pub struct ChildRuntimeRequest {
     pub message_id: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, Eq, PartialEq)]
 pub struct ChildRuntimeResponse {
     pub text: String,
     pub prompt_count: u64,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Eq, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ChildRuntimeUpdate {
+    TurnStarted,
+    TurnCompleted {
+        #[serde(rename = "inputTokens")]
+        input_tokens: Option<u64>,
+        #[serde(rename = "outputTokens")]
+        output_tokens: Option<u64>,
+    },
+    AgentMessage {
+        text: String,
+    },
+    CommandStarted {
+        command: String,
+    },
+    CommandCompleted {
+        command: String,
+        output: Option<String>,
+        #[serde(rename = "exitCode")]
+        exit_code: Option<i32>,
+    },
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Eq, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ChildRuntimeEnvelope {
+    Update { update: ChildRuntimeUpdate },
+    Result { result: ChildRuntimeResponse },
 }
 
 #[derive(Debug, Clone)]
