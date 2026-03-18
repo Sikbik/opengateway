@@ -15,6 +15,9 @@ use anyhow::{Context, Result};
 use serde_json::{json, Value};
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
+use std::sync::{mpsc, Arc, Mutex};
+use std::thread::{self, JoinHandle};
+use std::time::Duration;
 
 pub const TRANSPORT_NAME: &str = "stdio";
 
@@ -26,11 +29,11 @@ pub struct ServeConfig {
     pub runtime_mode: RuntimeMode,
 }
 
-#[derive(Debug)]
 struct ServerState {
     initialized: bool,
     shutdown_requested: bool,
-    supervisor: SessionSupervisor,
+    supervisor: Arc<Mutex<SessionSupervisor>>,
+    active_prompt: Option<ActivePrompt>,
 }
 
 enum LoopControl {
@@ -38,14 +41,39 @@ enum LoopControl {
     Exit,
 }
 
+struct ActivePrompt {
+    session_id: String,
+    request_id: Value,
+    prompt_len: usize,
+    event_rx: mpsc::Receiver<PromptWorkerEvent>,
+    cancel_tx: mpsc::Sender<()>,
+    worker: JoinHandle<()>,
+}
+
+enum PromptWorkerEvent {
+    Update(ChildRuntimeUpdate),
+    Completed(PromptResultPayload),
+    Failed(String),
+}
+
+struct PromptResultPayload {
+    outcome: super::supervisor::PromptOutcome,
+}
+
+enum InputFrame {
+    Line(String),
+    Eof,
+    Error(String),
+}
+
 pub fn serve_stdio<R, W, L>(
     config: ServeConfig,
-    mut input: R,
+    input: R,
     output: &mut W,
     log: &mut L,
 ) -> Result<()>
 where
-    R: BufRead,
+    R: BufRead + Send + 'static,
     W: Write,
     L: Write,
 {
@@ -65,89 +93,113 @@ where
     let mut state = ServerState {
         initialized: false,
         shutdown_requested: false,
-        supervisor: SessionSupervisor::new(config.runtime_mode),
+        supervisor: Arc::new(Mutex::new(SessionSupervisor::new(config.runtime_mode))),
+        active_prompt: None,
     };
-    let mut frame = String::new();
+    let (input_tx, input_rx) = mpsc::channel();
+    let _input_reader = spawn_input_reader(input, input_tx);
+    let mut input_closed = false;
     loop {
-        frame.clear();
-        if input
-            .read_line(&mut frame)
-            .context("failed to read ACP frame from stdin")?
-            == 0
-        {
-            log_line(log, "acp stdio server stopping on EOF")?;
+        if matches!(
+            handle_active_prompt(&config, &mut state, output, log)?,
+            LoopControl::Exit
+        ) {
+            break;
+        }
+        if input_closed && state.active_prompt.is_none() {
+            log_line(log, "acp stdio server stopping after EOF and prompt drain")?;
             break;
         }
 
-        let trimmed = frame.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
+        match input_rx.recv_timeout(Duration::from_millis(25)) {
+            Ok(InputFrame::Line(frame)) => {
+                let trimmed = frame.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
 
-        let raw_value = match serde_json::from_str::<Value>(trimmed) {
-            Ok(value) => value,
-            Err(error) => {
-                log_line(
-                    log,
-                    &format!("acp parse error: {error}; frame={}", redact_text(trimmed)),
-                )?;
-                write_message(
-                    output,
-                    &error_response(
-                        None,
-                        RpcError::new(
-                            PARSE_ERROR,
-                            "invalid JSON-RPC frame",
-                            Some(json!({ "detail": error.to_string() })),
+                let raw_value = match serde_json::from_str::<Value>(trimmed) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        log_line(
+                            log,
+                            &format!("acp parse error: {error}; frame={}", redact_text(trimmed)),
+                        )?;
+                        write_message(
+                            output,
+                            &error_response(
+                                None,
+                                RpcError::new(
+                                    PARSE_ERROR,
+                                    "invalid JSON-RPC frame",
+                                    Some(json!({ "detail": error.to_string() })),
+                                ),
+                            ),
+                        )?;
+                        continue;
+                    }
+                };
+
+                if raw_value.is_array() {
+                    write_message(
+                        output,
+                        &error_response(
+                            None,
+                            RpcError::new(INVALID_REQUEST, "batch requests are not supported", None),
                         ),
-                    ),
-                )?;
-                continue;
+                    )?;
+                    continue;
+                }
+
+                let request: RpcRequest = match serde_json::from_value(raw_value) {
+                    Ok(request) => request,
+                    Err(error) => {
+                        write_message(
+                            output,
+                            &error_response(
+                                None,
+                                RpcError::new(
+                                    INVALID_REQUEST,
+                                    "request frame is missing required JSON-RPC fields",
+                                    Some(json!({ "detail": error.to_string() })),
+                                ),
+                            ),
+                        )?;
+                        continue;
+                    }
+                };
+
+                match handle_request(&config, &mut state, request, output, log)? {
+                    LoopControl::Continue => {}
+                    LoopControl::Exit => {
+                        log_line(log, "acp stdio server exiting after exit notification")?;
+                        break;
+                    }
+                }
             }
-        };
-
-        if raw_value.is_array() {
-            write_message(
-                output,
-                &error_response(
-                    None,
-                    RpcError::new(INVALID_REQUEST, "batch requests are not supported", None),
-                ),
-            )?;
-            continue;
-        }
-
-        let request: RpcRequest = match serde_json::from_value(raw_value) {
-            Ok(request) => request,
-            Err(error) => {
-                write_message(
-                    output,
-                    &error_response(
-                        None,
-                        RpcError::new(
-                            INVALID_REQUEST,
-                            "request frame is missing required JSON-RPC fields",
-                            Some(json!({ "detail": error.to_string() })),
-                        ),
-                    ),
-                )?;
-                continue;
+            Ok(InputFrame::Eof) => {
+                input_closed = true;
             }
-        };
-
-        match handle_request(&config, &mut state, request, output, log)? {
-            LoopControl::Continue => {}
-            LoopControl::Exit => {
-                log_line(log, "acp stdio server exiting after exit notification")?;
-                break;
+            Ok(InputFrame::Error(error)) => return Err(anyhow::anyhow!(error)),
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                input_closed = true;
             }
         }
     }
 
-    if let Err(error) = state.supervisor.shutdown_all() {
+    if let Some(active) = state.active_prompt.take() {
+        let _ = active.cancel_tx.send(());
+        let _ = active.worker.join();
+    }
+    if let Err(error) = state
+        .supervisor
+        .lock()
+        .expect("ACP supervisor mutex poisoned")
+        .shutdown_all()
+    {
         log_line(log, &format!("failed to clean up ACP sessions on shutdown: {error}"))?;
     }
-
     Ok(())
 }
 
@@ -264,7 +316,12 @@ where
                     return Ok(LoopControl::Continue);
                 }
             };
-            let session = match state.supervisor.create(config.agent, params) {
+            let session = match state
+                .supervisor
+                .lock()
+                .expect("ACP supervisor mutex poisoned")
+                .create(config.agent, params)
+            {
                 Ok(session) => session,
                 Err(error) => {
                     write_message(
@@ -345,7 +402,27 @@ where
                     return Ok(LoopControl::Continue);
                 }
             };
-            if !state.supervisor.contains(&params.session_id) {
+            if state.active_prompt.is_some() {
+                write_message(
+                    output,
+                    &error_response(
+                        Some(id),
+                        RpcError::new(
+                            INVALID_REQUEST,
+                            "only one active ACP prompt is supported at a time in this MVP",
+                            None,
+                        ),
+                    ),
+                )?;
+                return Ok(LoopControl::Continue);
+            }
+
+            if !state
+                .supervisor
+                .lock()
+                .expect("ACP supervisor mutex poisoned")
+                .contains(&params.session_id)
+            {
                 write_message(
                     output,
                     &error_response(
@@ -360,56 +437,11 @@ where
                 return Ok(LoopControl::Continue);
             }
 
-            let prompt = match state.supervisor.prompt(params.clone(), |update| {
-                emit_prompt_update(config, output, log, &params.session_id, &update)
-            }) {
-                Ok(prompt) => prompt,
-                Err(error) => {
-                    write_message(
-                        output,
-                        &error_response(
-                            Some(id),
-                            RpcError::new(
-                                INTERNAL_ERROR,
-                                "failed to run ACP session prompt",
-                                Some(json!({ "detail": error.to_string() })),
-                            ),
-                        ),
-                    )?;
-                    return Ok(LoopControl::Continue);
-                }
-            };
-            record_session_event(
-                config,
-                log,
-                &prompt.session_id,
-                "prompt.completed",
-                json!({
-                    "promptCount": prompt.prompt_count,
-                    "userMessageId": prompt.message_id.clone(),
-                    "promptBlocks": params.prompt.len(),
-                }),
-            )?;
-            record_session_log(
-                config,
-                log,
-                &prompt.session_id,
-                &format!(
-                    "completed prompt {} with {} block(s)",
-                    prompt.prompt_count,
-                    params.prompt.len()
-                ),
-            )?;
-            write_message(
-                output,
-                &success_response(
-                    id,
-                    json!({
-                        "stopReason": "end_turn",
-                        "userMessageId": prompt.message_id,
-                    }),
-                ),
-            )?;
+            state.active_prompt = Some(spawn_prompt_worker(
+                state.supervisor.clone(),
+                params,
+                id,
+            ));
         }
         "session/cancel" => {
             if request.id.is_some() {
@@ -434,8 +466,33 @@ where
                     return Ok(LoopControl::Continue);
                 }
             };
+            if let Some(active) = state.active_prompt.as_ref() {
+                if active.session_id == params.session_id {
+                    let _ = active.cancel_tx.send(());
+                    log_line(log, &format!("acp prompt cancel requested {}", params.session_id))?;
+                    record_session_event(
+                        config,
+                        log,
+                        &params.session_id,
+                        "session.cancel_requested",
+                        json!({}),
+                    )?;
+                    record_session_log(
+                        config,
+                        log,
+                        &params.session_id,
+                        "cancel notification received for active prompt",
+                    )?;
+                    return Ok(LoopControl::Continue);
+                }
+            }
 
-            match state.supervisor.cancel(params.clone()) {
+            match state
+                .supervisor
+                .lock()
+                .expect("ACP supervisor mutex poisoned")
+                .cancel(params.clone())
+            {
                 Ok(CancelOutcome::Cancelled) => {
                     log_line(log, &format!("acp session cancelled {}", params.session_id))?;
                     record_session_event(
@@ -455,7 +512,7 @@ where
                 Ok(CancelOutcome::UnknownSession) => {
                     log_line(
                         log,
-                        &format!("acp mock cancel ignored for unknown session {}", params.session_id),
+                        &format!("acp cancel ignored for unknown session {}", params.session_id),
                     )?;
                 }
                 Err(error) => {
@@ -557,6 +614,178 @@ fn record_session_log<L: Write>(
     Ok(())
 }
 
+fn spawn_input_reader<R>(input: R, input_tx: mpsc::Sender<InputFrame>) -> JoinHandle<()>
+where
+    R: BufRead + Send + 'static,
+{
+    thread::spawn(move || {
+        let mut input = input;
+        let mut frame = String::new();
+
+        loop {
+            frame.clear();
+            match input.read_line(&mut frame) {
+                Ok(0) => {
+                    let _ = input_tx.send(InputFrame::Eof);
+                    break;
+                }
+                Ok(_) => {
+                    if input_tx.send(InputFrame::Line(frame.clone())).is_err() {
+                        break;
+                    }
+                }
+                Err(error) => {
+                    let _ = input_tx.send(InputFrame::Error(error.to_string()));
+                    break;
+                }
+            }
+        }
+    })
+}
+
+fn spawn_prompt_worker(
+    supervisor: Arc<Mutex<SessionSupervisor>>,
+    params: PromptParams,
+    request_id: Value,
+) -> ActivePrompt {
+    let (event_tx, event_rx) = mpsc::channel();
+    let (cancel_tx, cancel_rx) = mpsc::channel();
+    let session_id = params.session_id.clone();
+    let prompt_len = params.prompt.len();
+    let worker = thread::spawn(move || {
+        let result = supervisor
+            .lock()
+            .expect("ACP supervisor mutex poisoned")
+            .prompt(params, &cancel_rx, |update| {
+                event_tx
+                    .send(PromptWorkerEvent::Update(update))
+                    .map_err(|_| anyhow::anyhow!("ACP prompt event channel closed"))
+            });
+
+        match result {
+            Ok(outcome) => {
+                let _ = event_tx.send(PromptWorkerEvent::Completed(PromptResultPayload { outcome }));
+            }
+            Err(error) => {
+                let _ = event_tx.send(PromptWorkerEvent::Failed(error.to_string()));
+            }
+        }
+    });
+
+    ActivePrompt {
+        session_id,
+        request_id,
+        prompt_len,
+        event_rx,
+        cancel_tx,
+        worker,
+    }
+}
+
+fn handle_active_prompt<W, L>(
+    config: &ServeConfig,
+    state: &mut ServerState,
+    output: &mut W,
+    log: &mut L,
+) -> Result<LoopControl>
+where
+    W: Write,
+    L: Write,
+{
+    let Some(active) = state.active_prompt.as_mut() else {
+        return Ok(LoopControl::Continue);
+    };
+
+    loop {
+        match active.event_rx.try_recv() {
+            Ok(PromptWorkerEvent::Update(update)) => {
+                emit_prompt_update(config, output, log, &active.session_id, &update)?;
+            }
+            Ok(PromptWorkerEvent::Completed(payload)) => {
+                let outcome = payload.outcome;
+                record_session_event(
+                    config,
+                    log,
+                    &outcome.session_id,
+                    "prompt.completed",
+                    json!({
+                        "promptCount": outcome.prompt_count,
+                        "userMessageId": outcome.message_id.clone(),
+                        "promptBlocks": active.prompt_len,
+                        "stopReason": match outcome.stop_reason {
+                            super::session::ChildRuntimeStopReason::EndTurn => "end_turn",
+                            super::session::ChildRuntimeStopReason::Cancelled => "cancelled",
+                        },
+                    }),
+                )?;
+                record_session_log(
+                    config,
+                    log,
+                    &outcome.session_id,
+                    &format!(
+                        "completed prompt {} with {} block(s), stop_reason={}",
+                        outcome.prompt_count,
+                        active.prompt_len,
+                        match outcome.stop_reason {
+                            super::session::ChildRuntimeStopReason::EndTurn => "end_turn",
+                            super::session::ChildRuntimeStopReason::Cancelled => "cancelled",
+                        }
+                    ),
+                )?;
+                write_message(
+                    output,
+                    &success_response(
+                        active.request_id.clone(),
+                        json!({
+                            "stopReason": match outcome.stop_reason {
+                                super::session::ChildRuntimeStopReason::EndTurn => "end_turn",
+                                super::session::ChildRuntimeStopReason::Cancelled => "cancelled",
+                            },
+                            "userMessageId": outcome.message_id,
+                        }),
+                    ),
+                )?;
+                let finished = state.active_prompt.take().expect("active prompt missing");
+                let _ = finished.worker.join();
+                return Ok(LoopControl::Continue);
+            }
+            Ok(PromptWorkerEvent::Failed(error)) => {
+                write_message(
+                    output,
+                    &error_response(
+                        Some(active.request_id.clone()),
+                        RpcError::new(
+                            INTERNAL_ERROR,
+                            "failed to run ACP session prompt",
+                            Some(json!({ "detail": error })),
+                        ),
+                    ),
+                )?;
+                let finished = state.active_prompt.take().expect("active prompt missing");
+                let _ = finished.worker.join();
+                return Ok(LoopControl::Continue);
+            }
+            Err(mpsc::TryRecvError::Empty) => return Ok(LoopControl::Continue),
+            Err(mpsc::TryRecvError::Disconnected) => {
+                write_message(
+                    output,
+                    &error_response(
+                        Some(active.request_id.clone()),
+                        RpcError::new(
+                            INTERNAL_ERROR,
+                            "ACP prompt worker disconnected unexpectedly",
+                            None,
+                        ),
+                    ),
+                )?;
+                let finished = state.active_prompt.take().expect("active prompt missing");
+                let _ = finished.worker.join();
+                return Ok(LoopControl::Continue);
+            }
+        }
+    }
+}
+
 fn emit_prompt_update<W, L>(
     config: &ServeConfig,
     output: &mut W,
@@ -588,6 +817,9 @@ fn update_payload(update: &ChildRuntimeUpdate) -> Value {
     match update {
         ChildRuntimeUpdate::TurnStarted => json!({
             "sessionUpdate": "turn_started",
+        }),
+        ChildRuntimeUpdate::TurnCancelled => json!({
+            "sessionUpdate": "turn_cancelled",
         }),
         ChildRuntimeUpdate::TurnCompleted {
             input_tokens,
@@ -636,6 +868,7 @@ fn update_payload(update: &ChildRuntimeUpdate) -> Value {
 fn update_event_name(update: &ChildRuntimeUpdate) -> &'static str {
     match update {
         ChildRuntimeUpdate::TurnStarted => "prompt.turn_started",
+        ChildRuntimeUpdate::TurnCancelled => "prompt.turn_cancelled",
         ChildRuntimeUpdate::TurnCompleted { .. } => "prompt.turn_completed",
         ChildRuntimeUpdate::AgentMessage { .. } => "prompt.agent_message",
         ChildRuntimeUpdate::CommandStarted { .. } => "prompt.tool_started",
@@ -646,6 +879,7 @@ fn update_event_name(update: &ChildRuntimeUpdate) -> &'static str {
 fn update_log_line(update: &ChildRuntimeUpdate) -> String {
     match update {
         ChildRuntimeUpdate::TurnStarted => "Codex turn started".to_string(),
+        ChildRuntimeUpdate::TurnCancelled => "Codex turn cancelled".to_string(),
         ChildRuntimeUpdate::TurnCompleted {
             input_tokens,
             output_tokens,
@@ -712,7 +946,7 @@ mod tests {
                 paths: None,
                 runtime_mode: RuntimeMode::InProcessMock,
             },
-            Cursor::new(input.as_bytes()),
+            Cursor::new(input.as_bytes().to_vec()),
             &mut output,
             &mut log,
         )

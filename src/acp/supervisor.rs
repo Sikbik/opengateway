@@ -1,17 +1,19 @@
 use super::adapters::AgentKind;
 use super::session::{
     CancelParams, ChildRuntimeEnvelope, ChildRuntimeRequest, ChildRuntimeResponse,
-    ChildRuntimeUpdate, InProcessMockSession, NewSessionParams, PromptParams,
+    ChildRuntimeStopReason, ChildRuntimeUpdate, InProcessMockSession, NewSessionParams, PromptParams,
 };
 use anyhow::{anyhow, bail, Context, Result};
 use clap::{Args, ValueEnum};
 use std::collections::HashMap;
 use std::env;
 use std::io::{BufRead, BufReader, Write};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::thread::JoinHandle;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -57,7 +59,7 @@ enum SessionHandle {
 struct ProcessSession {
     child: Child,
     stdin: ChildStdin,
-    stdout: BufReader<ChildStdout>,
+    stdout: Option<BufReader<ChildStdout>>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -73,6 +75,7 @@ pub struct PromptOutcome {
     pub reply_text: String,
     pub prompt_count: u64,
     pub message_id: Option<String>,
+    pub stop_reason: ChildRuntimeStopReason,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -128,7 +131,12 @@ impl SessionSupervisor {
         self.sessions.contains_key(session_id)
     }
 
-    pub fn prompt<F>(&mut self, params: PromptParams, mut on_update: F) -> Result<PromptOutcome>
+    pub fn prompt<F>(
+        &mut self,
+        params: PromptParams,
+        cancel_rx: &Receiver<()>,
+        mut on_update: F,
+    ) -> Result<PromptOutcome>
     where
         F: FnMut(ChildRuntimeUpdate) -> Result<()>,
     {
@@ -140,18 +148,30 @@ impl SessionSupervisor {
 
         let result = match &mut handle {
             SessionHandle::InProcess(session) => {
-                let reply_text = session.build_mock_reply(&params);
-                on_update(ChildRuntimeUpdate::AgentMessage {
-                    text: reply_text.clone(),
-                })?;
-                Ok(PromptOutcome {
-                    session_id: session.id.clone(),
-                    reply_text,
-                    prompt_count: session.prompt_count,
-                    message_id: params.message_id,
-                })
+                if cancel_rx.try_recv().is_ok() {
+                    on_update(ChildRuntimeUpdate::TurnCancelled)?;
+                    Ok(PromptOutcome {
+                        session_id: session.id.clone(),
+                        reply_text: String::new(),
+                        prompt_count: session.prompt_count,
+                        message_id: params.message_id,
+                        stop_reason: ChildRuntimeStopReason::Cancelled,
+                    })
+                } else {
+                    let reply_text = session.build_mock_reply(&params);
+                    on_update(ChildRuntimeUpdate::AgentMessage {
+                        text: reply_text.clone(),
+                    })?;
+                    Ok(PromptOutcome {
+                        session_id: session.id.clone(),
+                        reply_text,
+                        prompt_count: session.prompt_count,
+                        message_id: params.message_id,
+                        stop_reason: ChildRuntimeStopReason::EndTurn,
+                    })
+                }
             }
-            SessionHandle::Process(session) => session.prompt(params, &mut on_update),
+            SessionHandle::Process(session) => session.prompt(params, cancel_rx, &mut on_update),
         };
 
         if result.is_ok() {
@@ -261,11 +281,16 @@ impl ProcessSession {
         Ok(Self {
             child,
             stdin,
-            stdout: BufReader::new(stdout),
+            stdout: Some(BufReader::new(stdout)),
         })
     }
 
-    fn prompt<F>(&mut self, params: PromptParams, on_update: &mut F) -> Result<PromptOutcome>
+    fn prompt<F>(
+        &mut self,
+        params: PromptParams,
+        cancel_rx: &Receiver<()>,
+        on_update: &mut F,
+    ) -> Result<PromptOutcome>
     where
         F: FnMut(ChildRuntimeUpdate) -> Result<()>,
     {
@@ -278,26 +303,64 @@ impl ProcessSession {
                 message_id: params.message_id.clone(),
             },
         )?;
+        let stdout = self
+            .stdout
+            .take()
+            .context("ACP session runtime stdout already in use")?;
+        let (envelope_tx, envelope_rx) = mpsc::channel();
+        let reader = spawn_runtime_reader(stdout, envelope_tx);
+        let mut cancelled = false;
         loop {
-            match read_json_line(&mut self.stdout)? {
-                ChildRuntimeEnvelope::Update { update } => on_update(update)?,
-                ChildRuntimeEnvelope::Result { result } => {
+            if !cancelled && cancel_rx.try_recv().is_ok() {
+                self.cancel_prompt()?;
+                cancelled = true;
+            }
+
+            match envelope_rx.recv_timeout(Duration::from_millis(25)) {
+                Ok(ChildRuntimeEnvelope::Update { update }) => on_update(update)?,
+                Ok(ChildRuntimeEnvelope::Result { result }) => {
+                    self.stdout = Some(join_runtime_reader(reader)?);
                     return Ok(PromptOutcome {
                         session_id: params.session_id,
                         reply_text: result.text,
                         prompt_count: result.prompt_count,
                         message_id: params.message_id,
+                        stop_reason: result.stop_reason,
                     });
+                }
+                Err(RecvTimeoutError::Timeout) => {
+                    self.ensure_alive("prompt")?;
+                }
+                Err(RecvTimeoutError::Disconnected) => {
+                    let read_error = match reader.join() {
+                        Ok(result) => result.err(),
+                        Err(_) => Some(anyhow!("ACP session runtime reader thread panicked")),
+                    };
+                    if let Some(error) = read_error {
+                        bail!("failed to read ACP session runtime output: {error}");
+                    }
+                    bail!("ACP session runtime output closed unexpectedly during prompt");
                 }
             }
         }
+    }
+
+    fn cancel_prompt(&mut self) -> Result<()> {
+        write_json_line(
+            &mut self.stdin,
+            &ChildRuntimeRequest {
+                kind: "cancel_prompt".to_string(),
+                prompt: Vec::new(),
+                message_id: None,
+            },
+        )
     }
 
     fn cancel(&mut self) -> Result<()> {
         let _ = write_json_line(
             &mut self.stdin,
             &ChildRuntimeRequest {
-                kind: "cancel".to_string(),
+                kind: "shutdown".to_string(),
                 prompt: Vec::new(),
                 message_id: None,
             },
@@ -385,11 +448,12 @@ pub fn command_mock_runtime(args: MockRuntimeArgs) -> Result<()> {
                         result: ChildRuntimeResponse {
                             text,
                             prompt_count: session.prompt_count,
+                            stop_reason: ChildRuntimeStopReason::EndTurn,
                         },
                     },
                 )?;
             }
-            "cancel" => break,
+            "cancel_prompt" | "shutdown" => break,
             other => bail!("unsupported ACP mock runtime command: {other}"),
         }
     }
@@ -428,6 +492,32 @@ where
     serde_json::from_str(line.trim()).context("failed to parse ACP runtime response")
 }
 
+fn spawn_runtime_reader(
+    mut stdout: BufReader<ChildStdout>,
+    envelope_tx: Sender<ChildRuntimeEnvelope>,
+) -> JoinHandle<Result<BufReader<ChildStdout>>> {
+    thread::spawn(move || {
+        loop {
+            let envelope: ChildRuntimeEnvelope = read_json_line(&mut stdout)?;
+            let finished = matches!(envelope, ChildRuntimeEnvelope::Result { .. });
+            if envelope_tx.send(envelope).is_err() {
+                break;
+            }
+            if finished {
+                break;
+            }
+        }
+        Ok(stdout)
+    })
+}
+
+fn join_runtime_reader(reader: JoinHandle<Result<BufReader<ChildStdout>>>) -> Result<BufReader<ChildStdout>> {
+    match reader.join() {
+        Ok(result) => result,
+        Err(_) => bail!("ACP session runtime reader thread panicked"),
+    }
+}
+
 fn validate_session_cwd(path: &Path) -> Result<()> {
     if !path.is_absolute() {
         bail!("session cwd must be absolute: {}", path.display());
@@ -459,7 +549,10 @@ fn apply_allowed_env(command: &mut Command) {
 mod tests {
     use super::{CancelOutcome, RuntimeMode, SessionSupervisor, MAX_ACTIVE_SESSIONS};
     use crate::acp::adapters::AgentKind;
-    use crate::acp::session::{CancelParams, NewSessionParams, PromptBlock, PromptParams};
+    use crate::acp::session::{
+        CancelParams, ChildRuntimeStopReason, NewSessionParams, PromptBlock, PromptParams,
+    };
+    use std::sync::mpsc;
     use std::path::PathBuf;
 
     #[test]
@@ -474,6 +567,7 @@ mod tests {
                 },
             )
             .expect("create");
+        let (_cancel_tx, cancel_rx) = mpsc::channel();
 
         let prompt = supervisor
             .prompt(
@@ -485,11 +579,13 @@ mod tests {
                     }],
                     message_id: Some("user-1".to_string()),
                 },
+                &cancel_rx,
                 |_| Ok(()),
             )
             .expect("prompt");
         assert_eq!(prompt.prompt_count, 1);
         assert!(prompt.reply_text.contains("hello"));
+        assert_eq!(prompt.stop_reason, ChildRuntimeStopReason::EndTurn);
 
         let cancelled = supervisor
             .cancel(CancelParams {

@@ -44,9 +44,18 @@ pub struct ChildRuntimeRequest {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum ChildRuntimeStopReason {
+    EndTurn,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Eq, PartialEq)]
 pub struct ChildRuntimeResponse {
     pub text: String,
     pub prompt_count: u64,
+    #[serde(rename = "stopReason")]
+    pub stop_reason: ChildRuntimeStopReason,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Eq, PartialEq)]
@@ -59,6 +68,7 @@ pub enum ChildRuntimeUpdate {
         #[serde(rename = "outputTokens")]
         output_tokens: Option<u64>,
     },
+    TurnCancelled,
     AgentMessage {
         text: String,
     },

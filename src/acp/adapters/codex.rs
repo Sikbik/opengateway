@@ -1,21 +1,27 @@
 use crate::acp::session::{
-    ChildRuntimeEnvelope, ChildRuntimeRequest, ChildRuntimeResponse, ChildRuntimeUpdate,
-    PromptBlock,
+    ChildRuntimeEnvelope, ChildRuntimeRequest, ChildRuntimeResponse, ChildRuntimeStopReason,
+    ChildRuntimeUpdate, PromptBlock,
 };
 use anyhow::{bail, Context, Result};
 use clap::Args;
 use serde_json::Value;
 use std::io::{BufRead, BufReader, Write};
+#[cfg(unix)]
+use std::os::unix::process::CommandExt as _;
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, ChildStdout, Command, Stdio};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::thread::{self, JoinHandle};
+use std::time::Duration;
 
 pub const RUNTIME_NAME: &str = "codex exec";
 pub const SCAFFOLD_NOTE: &str =
     "MVP session runtime launches `codex exec --json` for each ACP prompt.";
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
+const RUNTIME_POLL_INTERVAL: Duration = Duration::from_millis(25);
 
 #[derive(Debug, Args)]
 pub struct CodexRuntimeArgs {
@@ -34,55 +40,102 @@ struct CodexRuntimeSession {
     prompt_count: u64,
 }
 
+struct CodexPromptExecution {
+    child: Child,
+    stream_rx: Receiver<CodexStreamEvent>,
+    reader: JoinHandle<Result<()>>,
+    agent_messages: Vec<String>,
+    cancel_requested: bool,
+}
+
+struct CodexPromptResult {
+    text: String,
+    stop_reason: ChildRuntimeStopReason,
+}
+
+enum RuntimeInput {
+    Request(ChildRuntimeRequest),
+    Eof,
+    Error(String),
+}
+
+enum CodexStreamEvent {
+    Update(ChildRuntimeUpdate),
+}
+
 pub fn command_codex_runtime(args: CodexRuntimeArgs) -> Result<()> {
     let mut session = CodexRuntimeSession {
         cwd: args.cwd,
         mcp_server_count: args.mcp_server_count,
         prompt_count: 0,
     };
-    let stdin = std::io::stdin();
+    let (input_tx, input_rx) = mpsc::channel();
+    let _input_reader = spawn_runtime_input_reader(input_tx);
     let mut stdout = std::io::stdout().lock();
-    let mut reader = BufReader::new(stdin.lock());
-    let mut frame = String::new();
+    let mut active_prompt: Option<CodexPromptExecution> = None;
 
     loop {
-        frame.clear();
-        if reader
-            .read_line(&mut frame)
-            .context("failed to read ACP Codex runtime stdin")?
-            == 0
-        {
-            break;
-        }
-
-        let trimmed = frame.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-
-        let request: ChildRuntimeRequest = serde_json::from_str(trimmed)
-            .with_context(|| format!("invalid ACP Codex runtime frame: {trimmed}"))?;
-        match request.kind.as_str() {
-            "prompt" => {
+        if let Some(prompt) = active_prompt.as_mut() {
+            drain_prompt_updates(prompt, &mut stdout)?;
+            if let Some(result) = prompt.try_finish()? {
                 session.prompt_count += 1;
-                let text = run_codex_prompt(
-                    &session.cwd,
-                    &request.prompt,
-                    session.mcp_server_count,
-                    &mut stdout,
-                )?;
                 write_json_line(
                     &mut stdout,
                     &ChildRuntimeEnvelope::Result {
                         result: ChildRuntimeResponse {
-                            text,
+                            text: result.text,
                             prompt_count: session.prompt_count,
+                            stop_reason: result.stop_reason,
                         },
                     },
                 )?;
+                active_prompt = None;
+                continue;
             }
-            "cancel" => break,
-            other => bail!("unsupported ACP Codex runtime command: {other}"),
+        }
+
+        match input_rx.recv_timeout(RUNTIME_POLL_INTERVAL) {
+            Ok(RuntimeInput::Request(request)) => match request.kind.as_str() {
+                "prompt" => {
+                    if active_prompt.is_some() {
+                        bail!("ACP Codex runtime received prompt while another prompt was active");
+                    }
+                    active_prompt = Some(CodexPromptExecution::spawn(
+                        &session.cwd,
+                        &request.prompt,
+                        session.mcp_server_count,
+                    )?);
+                }
+                "cancel_prompt" => {
+                    if let Some(prompt) = active_prompt.as_mut() {
+                        prompt.cancel()?;
+                        write_json_line(
+                            &mut stdout,
+                            &ChildRuntimeEnvelope::Update {
+                                update: ChildRuntimeUpdate::TurnCancelled,
+                            },
+                        )?;
+                    }
+                }
+                "shutdown" => {
+                    if let Some(mut prompt) = active_prompt.take() {
+                        prompt.cancel()?;
+                        let _ = prompt.finish_blocking();
+                    }
+                    break;
+                }
+                other => bail!("unsupported ACP Codex runtime command: {other}"),
+            },
+            Ok(RuntimeInput::Eof) => {
+                if let Some(mut prompt) = active_prompt.take() {
+                    prompt.cancel()?;
+                    let _ = prompt.finish_blocking();
+                }
+                break;
+            }
+            Ok(RuntimeInput::Error(error)) => bail!("{error}"),
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => break,
         }
     }
 
@@ -124,92 +177,229 @@ pub fn build_codex_prompt(prompt: &[PromptBlock], mcp_server_count: usize) -> Re
     Ok(rendered)
 }
 
-fn run_codex_prompt<W>(
-    cwd: &Path,
-    prompt: &[PromptBlock],
-    mcp_server_count: usize,
-    runtime_output: &mut W,
-) -> Result<String>
-where
-    W: Write,
-{
-    let prompt_text = build_codex_prompt(prompt, mcp_server_count)?;
-    let mut command = Command::new("codex");
-    command
-        .arg("exec")
-        .arg("--json")
-        .arg("--ephemeral")
-        .arg("--skip-git-repo-check")
-        .arg("-C")
-        .arg(cwd)
-        .arg("-");
-    #[cfg(windows)]
-    command.creation_flags(CREATE_NO_WINDOW);
-    command
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
+fn spawn_runtime_input_reader(input_tx: Sender<RuntimeInput>) -> JoinHandle<()> {
+    thread::spawn(move || {
+        let stdin = std::io::stdin();
+        let mut reader = BufReader::new(stdin.lock());
+        let mut frame = String::new();
 
-    let mut child = command.spawn().context("failed to spawn `codex exec`")?;
-    let mut stdin = child
-        .stdin
-        .take()
-        .context("spawned `codex exec` has no stdin")?;
-    stdin
-        .write_all(prompt_text.as_bytes())
-        .context("failed to write ACP prompt to `codex exec`")?;
-    drop(stdin);
+        loop {
+            frame.clear();
+            match reader.read_line(&mut frame) {
+                Ok(0) => {
+                    let _ = input_tx.send(RuntimeInput::Eof);
+                    break;
+                }
+                Ok(_) => {
+                    let trimmed = frame.trim();
+                    if trimmed.is_empty() {
+                        continue;
+                    }
+                    match serde_json::from_str::<ChildRuntimeRequest>(trimmed) {
+                        Ok(request) => {
+                            if input_tx.send(RuntimeInput::Request(request)).is_err() {
+                                break;
+                            }
+                        }
+                        Err(error) => {
+                            let _ = input_tx.send(RuntimeInput::Error(format!(
+                                "invalid ACP Codex runtime frame: {trimmed}; {error}"
+                            )));
+                            break;
+                        }
+                    }
+                }
+                Err(error) => {
+                    let _ = input_tx.send(RuntimeInput::Error(format!(
+                        "failed to read ACP Codex runtime stdin: {error}"
+                    )));
+                    break;
+                }
+            }
+        }
+    })
+}
 
-    let stdout = child
-        .stdout
-        .take()
-        .context("spawned `codex exec` has no stdout")?;
-    let mut reader = BufReader::new(stdout);
-    let mut frame = String::new();
-    let mut agent_messages = Vec::new();
+impl CodexPromptExecution {
+    fn spawn(cwd: &Path, prompt: &[PromptBlock], mcp_server_count: usize) -> Result<Self> {
+        let prompt_text = build_codex_prompt(prompt, mcp_server_count)?;
+        let mut command = Command::new("codex");
+        command
+            .arg("exec")
+            .arg("--json")
+            .arg("--ephemeral")
+            .arg("--skip-git-repo-check")
+            .arg("-C")
+            .arg(cwd)
+            .arg("-");
+        #[cfg(windows)]
+        command.creation_flags(CREATE_NO_WINDOW);
+        command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        #[cfg(unix)]
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setpgid(0, 0) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
 
-    loop {
-        frame.clear();
-        if reader
-            .read_line(&mut frame)
-            .context("failed to read `codex exec --json` output")?
-            == 0
+        let mut child = command.spawn().context("failed to spawn `codex exec`")?;
+        let mut stdin = child
+            .stdin
+            .take()
+            .context("spawned `codex exec` has no stdin")?;
+        stdin
+            .write_all(prompt_text.as_bytes())
+            .context("failed to write ACP prompt to `codex exec`")?;
+        drop(stdin);
+
+        let stdout = child
+            .stdout
+            .take()
+            .context("spawned `codex exec` has no stdout")?;
+        let (stream_tx, stream_rx) = mpsc::channel();
+        let reader = spawn_codex_stream_reader(stdout, stream_tx);
+
+        Ok(Self {
+            child,
+            stream_rx,
+            reader,
+            agent_messages: Vec::new(),
+            cancel_requested: false,
+        })
+    }
+
+    fn cancel(&mut self) -> Result<()> {
+        if self.cancel_requested {
+            return Ok(());
+        }
+        self.cancel_requested = true;
+        #[cfg(unix)]
         {
-            break;
+            let pid = i32::try_from(self.child.id()).unwrap_or(i32::MAX);
+            let rc = unsafe { libc::killpg(pid, libc::SIGKILL) };
+            if rc == 0 {
+                return Ok(());
+            }
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() == Some(libc::ESRCH) {
+                return Ok(());
+            }
         }
-
-        let line = frame.trim();
-        if line.is_empty() {
-            continue;
+        match self.child.kill() {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::InvalidInput => Ok(()),
+            Err(error) => Err(error).context("failed to kill in-flight `codex exec`"),
         }
+    }
 
-        if let Some(update) = parse_codex_update(line)? {
+    fn try_drain_updates<W>(&mut self, output: &mut W) -> Result<()>
+    where
+        W: Write,
+    {
+        while let Ok(event) = self.stream_rx.try_recv() {
+            let CodexStreamEvent::Update(update) = event;
             if let ChildRuntimeUpdate::AgentMessage { text } = &update {
                 let trimmed = text.trim();
                 if !trimmed.is_empty() {
-                    agent_messages.push(trimmed.to_string());
+                    self.agent_messages.push(trimmed.to_string());
                 }
             }
-
-            write_json_line(
-                runtime_output,
-                &ChildRuntimeEnvelope::Update { update },
-            )?;
+            write_json_line(output, &ChildRuntimeEnvelope::Update { update })?;
         }
+        Ok(())
     }
 
-    let status = child
-        .wait()
-        .context("failed while waiting for `codex exec`")?;
-    if !status.success() {
-        bail!("`codex exec` failed with status {status}");
+    fn try_finish(&mut self) -> Result<Option<CodexPromptResult>> {
+        let Some(status) = self
+            .child
+            .try_wait()
+            .context("failed to poll in-flight `codex exec`")?
+        else {
+            return Ok(None);
+        };
+
+        join_codex_stream_reader(std::mem::replace(
+            &mut self.reader,
+            thread::spawn(|| Ok(())),
+        ))?;
+
+        if self.cancel_requested {
+            return Ok(Some(CodexPromptResult {
+                text: String::new(),
+                stop_reason: ChildRuntimeStopReason::Cancelled,
+            }));
+        }
+        if !status.success() {
+            bail!("`codex exec` failed with status {status}");
+        }
+        if self.agent_messages.is_empty() {
+            bail!("`codex exec --json` completed without an agent_message item");
+        }
+
+        Ok(Some(CodexPromptResult {
+            text: self.agent_messages.join("\n\n"),
+            stop_reason: ChildRuntimeStopReason::EndTurn,
+        }))
     }
 
-    if agent_messages.is_empty() {
-        bail!("`codex exec --json` completed without an agent_message item");
+    fn finish_blocking(mut self) -> Result<()> {
+        let _ = self.child.wait();
+        join_codex_stream_reader(self.reader)
     }
+}
 
-    Ok(agent_messages.join("\n\n"))
+fn spawn_codex_stream_reader(
+    stdout: ChildStdout,
+    stream_tx: Sender<CodexStreamEvent>,
+) -> JoinHandle<Result<()>> {
+    thread::spawn(move || {
+        let mut reader = BufReader::new(stdout);
+        let mut frame = String::new();
+
+        loop {
+            frame.clear();
+            if reader
+                .read_line(&mut frame)
+                .context("failed to read `codex exec --json` output")?
+                == 0
+            {
+                break;
+            }
+
+            let line = frame.trim();
+            if line.is_empty() {
+                continue;
+            }
+
+            if let Some(update) = parse_codex_update(line)? {
+                if stream_tx.send(CodexStreamEvent::Update(update)).is_err() {
+                    break;
+                }
+            }
+        }
+
+        Ok(())
+    })
+}
+
+fn join_codex_stream_reader(reader: JoinHandle<Result<()>>) -> Result<()> {
+    match reader.join() {
+        Ok(result) => result,
+        Err(_) => bail!("Codex stream reader thread panicked"),
+    }
+}
+
+fn drain_prompt_updates<W>(prompt: &mut CodexPromptExecution, output: &mut W) -> Result<()>
+where
+    W: Write,
+{
+    prompt.try_drain_updates(output)
 }
 
 fn parse_codex_update(line: &str) -> Result<Option<ChildRuntimeUpdate>> {

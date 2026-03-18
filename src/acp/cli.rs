@@ -81,7 +81,7 @@ fn command_serve(args: AcpServeArgs) -> Result<()> {
             paths: Some(paths.clone()),
             runtime_mode: RuntimeMode::Subprocess,
         },
-        BufReader::new(stdin.lock()),
+        BufReader::new(stdin),
         &mut stdout.lock(),
         &mut stderr,
     )
