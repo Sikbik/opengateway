@@ -33,6 +33,22 @@ pub struct PromptBlock {
     pub text: Option<String>,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ChildRuntimeRequest {
+    #[serde(rename = "type")]
+    pub kind: String,
+    #[serde(default)]
+    pub prompt: Vec<PromptBlock>,
+    #[serde(rename = "messageId", default)]
+    pub message_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ChildRuntimeResponse {
+    pub text: String,
+    pub prompt_count: u64,
+}
+
 #[derive(Debug, Clone)]
 pub struct InProcessMockSession {
     pub id: String,

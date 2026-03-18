@@ -90,6 +90,8 @@ enum Commands {
     SyncFactory(SyncFactoryArgs),
     #[command(hide = true)]
     Acp(acp::cli::AcpArgs),
+    #[command(name = "acp-codex-runtime", hide = true)]
+    AcpCodexRuntime(acp::CodexRuntimeArgs),
     #[command(name = "acp-mock-runtime", hide = true)]
     AcpMockRuntime(acp::MockRuntimeArgs),
     #[command(alias = "gui")]
@@ -439,6 +441,7 @@ fn run_cli() -> Result<()> {
         Commands::Setup(args) => command_setup(args),
         Commands::SyncFactory(args) => command_sync_factory(args),
         Commands::Acp(args) => acp::cli::command_acp(args),
+        Commands::AcpCodexRuntime(args) => acp::command_codex_runtime(args),
         Commands::AcpMockRuntime(args) => acp::command_mock_runtime(args),
         Commands::Control(args) => command_control(args),
         Commands::Start(args) => command_start(args),

@@ -79,7 +79,7 @@ fn command_serve(args: AcpServeArgs) -> Result<()> {
             agent: args.agent,
             workspace,
             paths: Some(paths.clone()),
-            runtime_mode: RuntimeMode::ProcessMock,
+            runtime_mode: RuntimeMode::Subprocess,
         },
         BufReader::new(stdin.lock()),
         &mut stdout.lock(),

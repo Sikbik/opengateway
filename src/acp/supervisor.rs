@@ -1,5 +1,8 @@
 use super::adapters::AgentKind;
-use super::session::{CancelParams, InProcessMockSession, NewSessionParams, PromptBlock, PromptParams};
+use super::session::{
+    CancelParams, ChildRuntimeRequest, ChildRuntimeResponse, InProcessMockSession, NewSessionParams,
+    PromptParams,
+};
 use anyhow::{anyhow, bail, Context, Result};
 use clap::{Args, ValueEnum};
 use serde::{Deserialize, Serialize};
@@ -21,6 +24,7 @@ const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 pub enum RuntimeMode {
+    Subprocess,
     ProcessMock,
     InProcessMock,
 }
@@ -78,22 +82,6 @@ pub enum CancelOutcome {
     UnknownSession,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
-struct MockRuntimeRequest {
-    #[serde(rename = "type")]
-    kind: String,
-    #[serde(default)]
-    prompt: Vec<PromptBlock>,
-    #[serde(rename = "messageId", default)]
-    message_id: Option<String>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct MockRuntimeResponse {
-    text: String,
-    prompt_count: u64,
-}
-
 impl SessionSupervisor {
     pub fn new(runtime_mode: RuntimeMode) -> Self {
         Self {
@@ -122,8 +110,13 @@ impl SessionSupervisor {
             RuntimeMode::InProcessMock => {
                 SessionHandle::InProcess(InProcessMockSession::new(session_id.clone(), agent, params))
             }
-            RuntimeMode::ProcessMock => {
-                SessionHandle::Process(ProcessSession::spawn(agent, &session_id, &params)?)
+            RuntimeMode::Subprocess | RuntimeMode::ProcessMock => {
+                SessionHandle::Process(ProcessSession::spawn(
+                    self.runtime_mode,
+                    agent,
+                    &session_id,
+                    &params,
+                )?)
             }
         };
 
@@ -208,36 +201,57 @@ impl SessionSupervisor {
 }
 
 impl ProcessSession {
-    fn spawn(agent: AgentKind, session_id: &str, params: &NewSessionParams) -> Result<Self> {
+    fn spawn(
+        runtime_mode: RuntimeMode,
+        agent: AgentKind,
+        session_id: &str,
+        params: &NewSessionParams,
+    ) -> Result<Self> {
         let mut command = Command::new(
             env::current_exe().context("failed to resolve current executable for ACP runtime")?,
         );
-        command
-            .arg("acp-mock-runtime")
-            .arg("--agent")
-            .arg(agent.as_str())
-            .arg("--session-id")
-            .arg(session_id)
-            .arg("--cwd")
-            .arg(&params.cwd)
-            .arg("--mcp-server-count")
-            .arg(params.mcp_servers.len().to_string())
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null());
+        match runtime_mode {
+            RuntimeMode::Subprocess => match agent {
+                AgentKind::Codex => {
+                    command
+                        .arg("acp-codex-runtime")
+                        .arg("--session-id")
+                        .arg(session_id)
+                        .arg("--cwd")
+                        .arg(&params.cwd)
+                        .arg("--mcp-server-count")
+                        .arg(params.mcp_servers.len().to_string());
+                }
+                AgentKind::Claude => bail!("ACP Claude runtime is not implemented yet"),
+            },
+            RuntimeMode::ProcessMock => {
+                command
+                    .arg("acp-mock-runtime")
+                    .arg("--agent")
+                    .arg(agent.as_str())
+                    .arg("--session-id")
+                    .arg(session_id)
+                    .arg("--cwd")
+                    .arg(&params.cwd)
+                    .arg("--mcp-server-count")
+                    .arg(params.mcp_servers.len().to_string());
+            }
+            RuntimeMode::InProcessMock => bail!("in-process mock runtime cannot spawn subprocesses"),
+        }
+        command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
         #[cfg(windows)]
         command.creation_flags(CREATE_NO_WINDOW);
         apply_allowed_env(&mut command);
 
-        let mut child = command.spawn().context("failed to spawn ACP mock runtime")?;
+        let mut child = command.spawn().context("failed to spawn ACP session runtime")?;
         let stdin = child
             .stdin
             .take()
-            .context("spawned ACP mock runtime has no stdin")?;
+            .context("spawned ACP session runtime has no stdin")?;
         let stdout = child
             .stdout
             .take()
-            .context("spawned ACP mock runtime has no stdout")?;
+            .context("spawned ACP session runtime has no stdout")?;
 
         Ok(Self {
             child,
@@ -250,13 +264,13 @@ impl ProcessSession {
         self.ensure_alive("prompt")?;
         write_json_line(
             &mut self.stdin,
-            &MockRuntimeRequest {
+            &ChildRuntimeRequest {
                 kind: "prompt".to_string(),
                 prompt: params.prompt.clone(),
                 message_id: params.message_id.clone(),
             },
         )?;
-        let response: MockRuntimeResponse = read_json_line(&mut self.stdout)?;
+        let response: ChildRuntimeResponse = read_json_line(&mut self.stdout)?;
 
         Ok(PromptOutcome {
             session_id: params.session_id,
@@ -269,7 +283,7 @@ impl ProcessSession {
     fn cancel(&mut self) -> Result<()> {
         let _ = write_json_line(
             &mut self.stdin,
-            &MockRuntimeRequest {
+            &ChildRuntimeRequest {
                 kind: "cancel".to_string(),
                 prompt: Vec::new(),
                 message_id: None,
@@ -281,7 +295,7 @@ impl ProcessSession {
             if self
                 .child
                 .try_wait()
-                .context("failed to poll ACP mock runtime during cancel")?
+                .context("failed to poll ACP session runtime during cancel")?
                 .is_some()
             {
                 return Ok(());
@@ -291,7 +305,7 @@ impl ProcessSession {
 
         self.child
             .kill()
-            .context("failed to kill ACP mock runtime after cancel timeout")?;
+            .context("failed to kill ACP session runtime after cancel timeout")?;
         let _ = self.child.wait();
         Ok(())
     }
@@ -300,9 +314,9 @@ impl ProcessSession {
         if let Some(status) = self
             .child
             .try_wait()
-            .with_context(|| format!("failed to poll ACP mock runtime before {operation}"))?
+            .with_context(|| format!("failed to poll ACP session runtime before {operation}"))?
         {
-            bail!("ACP mock runtime exited unexpectedly before {operation}: {status}");
+            bail!("ACP session runtime exited unexpectedly before {operation}: {status}");
         }
         Ok(())
     }
@@ -336,7 +350,7 @@ pub fn command_mock_runtime(args: MockRuntimeArgs) -> Result<()> {
             continue;
         }
 
-        let request: MockRuntimeRequest = serde_json::from_str(trimmed)
+        let request: ChildRuntimeRequest = serde_json::from_str(trimmed)
             .with_context(|| format!("invalid ACP mock runtime frame: {trimmed}"))?;
         match request.kind.as_str() {
             "prompt" => {
@@ -348,7 +362,7 @@ pub fn command_mock_runtime(args: MockRuntimeArgs) -> Result<()> {
                 let text = session.build_mock_reply(&params);
                 write_json_line(
                     &mut stdout,
-                    &MockRuntimeResponse {
+                    &ChildRuntimeResponse {
                         text,
                         prompt_count: session.prompt_count,
                     },
@@ -388,7 +402,7 @@ where
         .context("failed to read ACP runtime response")?
         == 0
     {
-        bail!("ACP mock runtime closed stdout unexpectedly");
+        bail!("ACP session runtime closed stdout unexpectedly");
     }
     serde_json::from_str(line.trim()).context("failed to parse ACP runtime response")
 }
@@ -497,5 +511,20 @@ mod tests {
             )
             .expect_err("cap should reject");
         assert!(error.to_string().contains("session limit reached"));
+    }
+
+    #[test]
+    fn real_subprocess_mode_rejects_claude_until_adapter_exists() {
+        let mut supervisor = SessionSupervisor::new(RuntimeMode::Subprocess);
+        let error = supervisor
+            .create(
+                AgentKind::Claude,
+                NewSessionParams {
+                    cwd: PathBuf::from("/tmp"),
+                    mcp_servers: vec![],
+                },
+            )
+            .expect_err("claude should not create yet");
+        assert!(error.to_string().contains("Claude runtime is not implemented"));
     }
 }

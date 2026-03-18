@@ -1,5 +1,5 @@
-mod claude;
-mod codex;
+pub(crate) mod claude;
+pub(crate) mod codex;
 
 use clap::ValueEnum;
 
@@ -22,7 +22,7 @@ pub fn supported_agents() -> &'static [AgentDescriptor] {
         AgentDescriptor {
             kind: AgentKind::Codex,
             runtime_name: codex::RUNTIME_NAME,
-            status: "planned-first",
+            status: "mvp-session-runtime",
             note: codex::SCAFFOLD_NOTE,
         },
         AgentDescriptor {
@@ -51,6 +51,6 @@ mod tests {
     fn supported_agents_include_codex_first() {
         let agents = supported_agents();
         assert_eq!(agents[0].kind, AgentKind::Codex);
-        assert_eq!(agents[0].runtime_name, "codex");
+        assert_eq!(agents[0].runtime_name, "codex exec");
     }
 }
