@@ -1,11 +1,14 @@
+use crate::acp::adapters::AgentKind;
+use crate::acp::bridge::{default_bridge_port, DEFAULT_BRIDGE_HOST};
 use crate::auth_store::{AuthStore, NewCredential, OAuthCredential};
 use crate::oauth;
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use reqwest::blocking::Client;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -17,6 +20,8 @@ const DEFAULT_INSTRUCTIONS: &str = "You are a helpful assistant.";
 const RETRY_AFTER_SECONDS: u64 = 1;
 const RATE_LIMITER_ENTRY_TTL: Duration = Duration::from_secs(15 * 60);
 const RATE_LIMITER_CLEANUP_INTERVAL: Duration = Duration::from_secs(60);
+const ACP_MODEL_PREFIX: &str = "acp:";
+const ACP_WORKSPACE_HEADER: &str = "x-opengateway-workspace";
 
 const HOP_BY_HOP_HEADERS: &[&str] = &[
     "connection",
@@ -42,6 +47,7 @@ pub struct RunConfig {
     pub queue_timeout: Duration,
     pub per_client_rate: f64,
     pub per_client_burst: usize,
+    pub default_acp_workspace: Option<PathBuf>,
 }
 
 #[derive(Debug)]
@@ -49,6 +55,7 @@ struct ServiceState {
     api_key: String,
     models: Vec<String>,
     max_body_bytes: usize,
+    default_acp_workspace: Option<PathBuf>,
     auth_store: AuthStore,
     upstream_client: Client,
     request_gate: Arc<RequestGate>,
@@ -160,6 +167,7 @@ pub fn run_service(config: RunConfig, auth_store: AuthStore) -> Result<()> {
         api_key: config.api_key,
         models: config.models,
         max_body_bytes: config.max_body_bytes,
+        default_acp_workspace: config.default_acp_workspace,
         auth_store,
         upstream_client,
         request_gate,
@@ -405,6 +413,12 @@ fn proxy_upstream(
     request: HttpRequest,
     state: &Arc<ServiceState>,
 ) -> Result<()> {
+    if let Some(route) =
+        parse_requested_model_id(&request.body).and_then(|model_id| parse_acp_model_route(&model_id))
+    {
+        return proxy_acp(client_stream, request, state, route);
+    }
+
     let client_requested_stream = request_prefers_stream(&request.body);
     let credential = active_or_refreshed_credential(&state.auth_store)?;
     let normalized_body = normalize_model_alias_in_request_body(request.body);
@@ -508,6 +522,748 @@ fn proxy_upstream(
 
     write_http_response(client_stream, &response)?;
     Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AcpModelRoute {
+    agent: AgentKind,
+    requested_model: String,
+    runtime_model: Option<String>,
+}
+
+struct AcpBridgeClient {
+    reader: BufReader<TcpStream>,
+    writer: TcpStream,
+    next_request_id: u64,
+}
+
+struct AcpPromptResult {
+    reply_text: String,
+    stop_reason: String,
+}
+
+struct AcpResponseMeta {
+    response_id: String,
+    message_id: String,
+    model: String,
+    created: u64,
+}
+
+fn proxy_acp(
+    client_stream: &mut TcpStream,
+    request: HttpRequest,
+    state: &Arc<ServiceState>,
+    route: AcpModelRoute,
+) -> Result<()> {
+    let client_requested_stream = request_prefers_stream(&request.body);
+    let path = request.path.split('?').next().unwrap_or_default();
+    let payload: Value = match serde_json::from_slice(&request.body) {
+        Ok(payload) => payload,
+        Err(error) => {
+            let response = openai_error_response(
+                400,
+                format!("invalid JSON request body: {error}"),
+                "invalid_request_error",
+            );
+            write_http_response(client_stream, &response)?;
+            return Ok(());
+        }
+    };
+
+    let workspace = match resolve_acp_workspace(&request, state.default_acp_workspace.as_deref()) {
+        Ok(workspace) => workspace,
+        Err(error) => {
+            let response =
+                openai_error_response(400, error.to_string(), "invalid_request_error");
+            write_http_response(client_stream, &response)?;
+            return Ok(());
+        }
+    };
+    let prompt_text = build_acp_prompt_text(&payload);
+    if prompt_text.trim().is_empty() {
+        let response = openai_error_response(
+            400,
+            "ACP model requests require text input or messages",
+            "invalid_request_error",
+        );
+        write_http_response(client_stream, &response)?;
+        return Ok(());
+    }
+
+    let mut bridge = match AcpBridgeClient::connect(route.agent) {
+        Ok(bridge) => bridge,
+        Err(error) => {
+            let response = openai_error_response(
+                503,
+                format!(
+                    "ACP {} bridge is unavailable; start it from the ACP panel or `opengateway acp bridge start --agent {}`: {error}",
+                    route.agent.as_str(),
+                    route.agent.as_str()
+                ),
+                "service_unavailable",
+            );
+            write_http_response(client_stream, &response)?;
+            return Ok(());
+        }
+    };
+
+    if let Err(error) = bridge.initialize() {
+        let response = openai_error_response(
+            502,
+            format!("failed to initialize ACP {} bridge: {error}", route.agent.as_str()),
+            "bad_gateway",
+        );
+        write_http_response(client_stream, &response)?;
+        return Ok(());
+    }
+
+    let session_id = match bridge.new_session(&workspace, route.runtime_model.as_deref()) {
+        Ok(session_id) => session_id,
+        Err(error) => {
+            let response = openai_error_response(
+                502,
+                format!("failed to create ACP session: {error}"),
+                "bad_gateway",
+            );
+            write_http_response(client_stream, &response)?;
+            return Ok(());
+        }
+    };
+
+    let response_meta = AcpResponseMeta {
+        response_id: format!("acp_{}", now_millis()),
+        message_id: format!("msg_{}", now_millis()),
+        model: route.requested_model.clone(),
+        created: (now_millis() / 1000) as u64,
+    };
+
+    if client_requested_stream {
+        let headers = vec![
+            (
+                "Content-Type".to_string(),
+                "text/event-stream; charset=utf-8".to_string(),
+            ),
+            ("Cache-Control".to_string(), "no-cache".to_string()),
+            ("X-Accel-Buffering".to_string(), "no".to_string()),
+        ];
+        write_http_response_head(client_stream, 200, &headers, None)?;
+        emit_acp_sse_prelude(client_stream, path, &response_meta)?;
+    }
+
+    let prompt_result = bridge.prompt(&session_id, &prompt_text, |chunk| {
+        if client_requested_stream {
+            emit_acp_sse_chunk(client_stream, path, &response_meta, chunk)?;
+        }
+        Ok(())
+    });
+
+    match prompt_result {
+        Ok(result) => {
+            if client_requested_stream {
+                emit_acp_sse_completion(
+                    client_stream,
+                    path,
+                    &response_meta,
+                    &result.reply_text,
+                    &result.stop_reason,
+                )?;
+            } else {
+                let response = build_acp_http_response(
+                    path,
+                    &response_meta,
+                    &result.reply_text,
+                    &result.stop_reason,
+                );
+                write_http_response(client_stream, &response)?;
+            }
+        }
+        Err(error) => {
+            if client_requested_stream {
+                write_sse_data(
+                    client_stream,
+                    &json!({
+                        "type": "response.failed",
+                        "response": {
+                            "id": response_meta.response_id,
+                            "object": "response",
+                            "created_at": response_meta.created,
+                            "status": "failed",
+                            "model": response_meta.model,
+                            "error": {
+                                "message": format!("ACP prompt failed: {error}"),
+                                "type": "bad_gateway"
+                            }
+                        }
+                    }),
+                )?;
+                client_stream
+                    .write_all(b"data: [DONE]\n\n")
+                    .context("failed writing ACP SSE terminator")?;
+                client_stream.flush().ok();
+            } else {
+                let response = openai_error_response(
+                    502,
+                    format!("ACP prompt failed: {error}"),
+                    "bad_gateway",
+                );
+                write_http_response(client_stream, &response)?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn parse_requested_model_id(body: &[u8]) -> Option<String> {
+    serde_json::from_slice::<Value>(body)
+        .ok()
+        .and_then(|payload| payload.get("model").and_then(Value::as_str).map(str::to_string))
+}
+
+fn parse_acp_model_route(model_id: &str) -> Option<AcpModelRoute> {
+    let trimmed = model_id.trim();
+    let suffix = trimmed.strip_prefix(ACP_MODEL_PREFIX)?;
+    let (agent_name, runtime_model) = match suffix.split_once(':') {
+        Some((agent_name, runtime_model)) => (agent_name, Some(runtime_model.trim().to_string())),
+        None => (suffix, None),
+    };
+
+    let agent = match agent_name {
+        "codex" => AgentKind::Codex,
+        "claude" => AgentKind::Claude,
+        _ => return None,
+    };
+
+    Some(AcpModelRoute {
+        agent,
+        requested_model: trimmed.to_string(),
+        runtime_model: runtime_model.filter(|value| !value.is_empty()),
+    })
+}
+
+fn resolve_acp_workspace(request: &HttpRequest, default_workspace: Option<&Path>) -> Result<PathBuf> {
+    if let Some(header_value) = request.headers.get(ACP_WORKSPACE_HEADER) {
+        let candidate = PathBuf::from(header_value.trim());
+        let resolved = if candidate.is_absolute() {
+            candidate
+        } else if let Some(base) = default_workspace {
+            base.join(candidate)
+        } else {
+            bail!("ACP workspace header must be an absolute path when no default ACP workspace is configured");
+        };
+        if !resolved.is_dir() {
+            bail!("ACP workspace does not exist: {}", resolved.display());
+        }
+        return Ok(resolved);
+    }
+
+    let Some(default_workspace) = default_workspace else {
+        bail!(
+            "ACP model requests require either the X-OpenGateway-Workspace header or OPENGATEWAY_WORKSPACE/current repo root"
+        );
+    };
+    if !default_workspace.is_dir() {
+        bail!("configured ACP workspace does not exist: {}", default_workspace.display());
+    }
+    Ok(default_workspace.to_path_buf())
+}
+
+fn build_acp_prompt_text(payload: &Value) -> String {
+    let Some(object) = payload.as_object() else {
+        return String::new();
+    };
+
+    let mut sections = Vec::new();
+    if let Some(instructions) = object.get("instructions") {
+        let text = collect_text_from_value(instructions);
+        if !text.is_empty() {
+            sections.push(format!("Instructions:\n{text}"));
+        }
+    }
+    if let Some(system) = object.get("system") {
+        let text = collect_text_from_value(system);
+        if !text.is_empty() {
+            sections.push(format!("System:\n{text}"));
+        }
+    }
+    if let Some(messages) = object.get("messages").and_then(Value::as_array) {
+        let conversation = render_acp_messages(messages);
+        if !conversation.is_empty() {
+            sections.push(format!("Conversation:\n{conversation}"));
+        }
+    } else if let Some(input) = object.get("input") {
+        let conversation = render_acp_input(input);
+        if !conversation.is_empty() {
+            sections.push(format!("Conversation:\n{conversation}"));
+        }
+    }
+
+    sections.join("\n\n")
+}
+
+fn render_acp_messages(messages: &[Value]) -> String {
+    messages
+        .iter()
+        .filter_map(|message| {
+            let object = message.as_object()?;
+            let role = object.get("role").and_then(Value::as_str).unwrap_or("user");
+            let content = object.get("content").unwrap_or(&Value::Null);
+            let text = collect_text_from_value(content);
+            if text.is_empty() {
+                None
+            } else {
+                Some(format!("{}: {}", format_message_role(role), text))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+fn render_acp_input(input: &Value) -> String {
+    match input {
+        Value::String(text) => text.trim().to_string(),
+        Value::Array(items) => items
+            .iter()
+            .filter_map(|item| match item {
+                Value::Object(object) => {
+                    let role = object.get("role").and_then(Value::as_str).unwrap_or("user");
+                    let content = object
+                        .get("content")
+                        .or_else(|| object.get("text"))
+                        .unwrap_or(&Value::Null);
+                    let text = collect_text_from_value(content);
+                    if text.is_empty() {
+                        None
+                    } else {
+                        Some(format!("{}: {}", format_message_role(role), text))
+                    }
+                }
+                Value::String(text) => {
+                    let text = text.trim();
+                    if text.is_empty() {
+                        None
+                    } else {
+                        Some(format!("User: {text}"))
+                    }
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n"),
+        Value::Object(object) => {
+            let role = object.get("role").and_then(Value::as_str).unwrap_or("user");
+            let content = object
+                .get("content")
+                .or_else(|| object.get("text"))
+                .unwrap_or(&Value::Null);
+            let text = collect_text_from_value(content);
+            if text.is_empty() {
+                String::new()
+            } else {
+                format!("{}: {}", format_message_role(role), text)
+            }
+        }
+        _ => String::new(),
+    }
+}
+
+fn format_message_role(role: &str) -> &'static str {
+    match role {
+        "assistant" => "Assistant",
+        "system" => "System",
+        "developer" => "Developer",
+        "tool" => "Tool",
+        _ => "User",
+    }
+}
+
+impl AcpBridgeClient {
+    fn connect(agent: AgentKind) -> Result<Self> {
+        let endpoint = format!("{}:{}", DEFAULT_BRIDGE_HOST, default_bridge_port(agent));
+        let address = endpoint
+            .parse::<SocketAddr>()
+            .with_context(|| format!("invalid ACP bridge endpoint {endpoint}"))?;
+        let writer = TcpStream::connect_timeout(&address, Duration::from_secs(2))
+            .with_context(|| format!("failed connecting to ACP {} bridge", agent.as_str()))?;
+        writer
+            .set_read_timeout(Some(Duration::from_secs(10 * 60)))
+            .ok();
+        writer
+            .set_write_timeout(Some(Duration::from_secs(30)))
+            .ok();
+        let reader = BufReader::new(
+            writer
+                .try_clone()
+                .context("failed to clone ACP bridge stream")?,
+        );
+        Ok(Self {
+            reader,
+            writer,
+            next_request_id: 1,
+        })
+    }
+
+    fn initialize(&mut self) -> Result<()> {
+        self.request("initialize", json!({}))?;
+        Ok(())
+    }
+
+    fn new_session(&mut self, cwd: &Path, model: Option<&str>) -> Result<String> {
+        let mut params = json!({
+            "cwd": cwd.display().to_string(),
+            "mcpServers": [],
+        });
+        if let Some(model) = model.filter(|value| !value.trim().is_empty()) {
+            params["model"] = Value::String(model.to_string());
+        }
+        let result = self.request("session/new", params)?;
+        result
+            .get("sessionId")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .ok_or_else(|| anyhow!("ACP session/new did not return sessionId"))
+    }
+
+    fn prompt<F>(
+        &mut self,
+        session_id: &str,
+        prompt_text: &str,
+        mut on_chunk: F,
+    ) -> Result<AcpPromptResult>
+    where
+        F: FnMut(&str) -> Result<()>,
+    {
+        let request_id = self.next_request_id;
+        self.next_request_id += 1;
+        self.write_frame(&json!({
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "method": "session/prompt",
+            "params": {
+                "sessionId": session_id,
+                "prompt": [
+                    {
+                        "type": "text",
+                        "text": prompt_text,
+                    }
+                ],
+                "messageId": format!("http-{}", now_millis()),
+            }
+        }))?;
+
+        let mut reply_text = String::new();
+        loop {
+            let frame = self.read_frame()?;
+            if frame
+                .get("method")
+                .and_then(Value::as_str)
+                == Some("session/update")
+            {
+                if frame
+                    .get("params")
+                    .and_then(|params| params.get("sessionId"))
+                    .and_then(Value::as_str)
+                    != Some(session_id)
+                {
+                    continue;
+                }
+                if let Some(text) = frame
+                    .get("params")
+                    .and_then(|params| params.get("update"))
+                    .and_then(|update| update.get("content"))
+                    .and_then(|content| content.get("text"))
+                    .and_then(Value::as_str)
+                {
+                    reply_text.push_str(text);
+                    on_chunk(text)?;
+                }
+                continue;
+            }
+
+            if frame.get("id").and_then(Value::as_u64) != Some(request_id) {
+                continue;
+            }
+            if let Some(error) = frame.get("error") {
+                bail!("ACP prompt request failed: {}", rpc_error_message(error));
+            }
+
+            let stop_reason = frame
+                .get("result")
+                .and_then(|result| result.get("stopReason"))
+                .and_then(Value::as_str)
+                .unwrap_or("end_turn")
+                .to_string();
+            return Ok(AcpPromptResult {
+                reply_text,
+                stop_reason,
+            });
+        }
+    }
+
+    fn request(&mut self, method: &str, params: Value) -> Result<Value> {
+        let request_id = self.next_request_id;
+        self.next_request_id += 1;
+        self.write_frame(&json!({
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "method": method,
+            "params": params,
+        }))?;
+
+        loop {
+            let frame = self.read_frame()?;
+            if frame.get("id").and_then(Value::as_u64) != Some(request_id) {
+                continue;
+            }
+            if let Some(error) = frame.get("error") {
+                bail!("ACP {method} failed: {}", rpc_error_message(error));
+            }
+            return Ok(frame.get("result").cloned().unwrap_or(Value::Null));
+        }
+    }
+
+    fn write_frame(&mut self, value: &Value) -> Result<()> {
+        serde_json::to_writer(&mut self.writer, value).context("failed writing ACP frame")?;
+        self.writer
+            .write_all(b"\n")
+            .context("failed terminating ACP frame")?;
+        self.writer.flush().context("failed flushing ACP frame")
+    }
+
+    fn read_frame(&mut self) -> Result<Value> {
+        let mut line = String::new();
+        loop {
+            line.clear();
+            let read = self
+                .reader
+                .read_line(&mut line)
+                .context("failed reading ACP frame")?;
+            if read == 0 {
+                bail!("ACP bridge connection closed unexpectedly");
+            }
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            return serde_json::from_str(trimmed)
+                .with_context(|| format!("failed decoding ACP frame: {trimmed}"));
+        }
+    }
+}
+
+fn rpc_error_message(error: &Value) -> String {
+    let code = error.get("code").and_then(Value::as_i64).unwrap_or_default();
+    let message = error
+        .get("message")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown ACP error");
+    format!("{message} (code {code})")
+}
+
+fn build_acp_http_response(
+    path: &str,
+    meta: &AcpResponseMeta,
+    text: &str,
+    stop_reason: &str,
+) -> HttpResponse {
+    json_response(
+        200,
+        if path == "/v1/chat/completions" {
+            json!({
+                "id": meta.response_id,
+                "object": "chat.completion",
+                "created": meta.created,
+                "model": meta.model,
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": text
+                        },
+                        "finish_reason": chat_finish_reason(stop_reason)
+                    }
+                ]
+            })
+        } else {
+            json!({
+                "id": meta.response_id,
+                "object": "response",
+                "created_at": meta.created,
+                "status": "completed",
+                "model": meta.model,
+                "output": [
+                    {
+                        "type": "message",
+                        "id": meta.message_id,
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": text,
+                                "annotations": []
+                            }
+                        ]
+                    }
+                ],
+                "output_text": text
+            })
+        },
+    )
+}
+
+fn emit_acp_sse_prelude(
+    client_stream: &mut TcpStream,
+    path: &str,
+    meta: &AcpResponseMeta,
+) -> Result<()> {
+    if path == "/v1/chat/completions" {
+        write_sse_data(
+            client_stream,
+            &json!({
+                "id": meta.response_id,
+                "object": "chat.completion.chunk",
+                "created": meta.created,
+                "model": meta.model,
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {
+                            "role": "assistant"
+                        },
+                        "finish_reason": Value::Null
+                    }
+                ]
+            }),
+        )
+    } else {
+        write_sse_data(
+            client_stream,
+            &json!({
+                "type": "response.created",
+                "response": {
+                    "id": meta.response_id,
+                    "object": "response",
+                    "created_at": meta.created,
+                    "status": "in_progress",
+                    "model": meta.model,
+                    "output": []
+                }
+            }),
+        )
+    }
+}
+
+fn emit_acp_sse_chunk(
+    client_stream: &mut TcpStream,
+    path: &str,
+    meta: &AcpResponseMeta,
+    text: &str,
+) -> Result<()> {
+    if path == "/v1/chat/completions" {
+        write_sse_data(
+            client_stream,
+            &json!({
+                "id": meta.response_id,
+                "object": "chat.completion.chunk",
+                "created": meta.created,
+                "model": meta.model,
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {
+                            "content": text
+                        },
+                        "finish_reason": Value::Null
+                    }
+                ]
+            }),
+        )
+    } else {
+        write_sse_data(
+            client_stream,
+            &json!({
+                "type": "response.output_text.delta",
+                "response_id": meta.response_id,
+                "delta": text
+            }),
+        )
+    }
+}
+
+fn emit_acp_sse_completion(
+    client_stream: &mut TcpStream,
+    path: &str,
+    meta: &AcpResponseMeta,
+    text: &str,
+    stop_reason: &str,
+) -> Result<()> {
+    if path == "/v1/chat/completions" {
+        write_sse_data(
+            client_stream,
+            &json!({
+                "id": meta.response_id,
+                "object": "chat.completion.chunk",
+                "created": meta.created,
+                "model": meta.model,
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {},
+                        "finish_reason": chat_finish_reason(stop_reason)
+                    }
+                ]
+            }),
+        )?;
+    } else {
+        write_sse_data(
+            client_stream,
+            &json!({
+                "type": "response.completed",
+                "response": {
+                    "id": meta.response_id,
+                    "object": "response",
+                    "created_at": meta.created,
+                    "status": "completed",
+                    "model": meta.model,
+                    "output": [
+                        {
+                            "type": "message",
+                            "id": meta.message_id,
+                            "role": "assistant",
+                            "content": [
+                                {
+                                    "type": "output_text",
+                                    "text": text,
+                                    "annotations": []
+                                }
+                            ]
+                        }
+                    ],
+                    "output_text": text
+                }
+            }),
+        )?;
+    }
+    client_stream
+        .write_all(b"data: [DONE]\n\n")
+        .context("failed writing ACP SSE terminator")?;
+    client_stream.flush().ok();
+    Ok(())
+}
+
+fn write_sse_data(client_stream: &mut TcpStream, payload: &Value) -> Result<()> {
+    let rendered = serde_json::to_string(payload).context("failed to encode SSE payload")?;
+    write!(client_stream, "data: {rendered}\n\n").context("failed writing SSE payload")?;
+    client_stream.flush().ok();
+    Ok(())
+}
+
+fn chat_finish_reason(stop_reason: &str) -> &str {
+    match stop_reason {
+        "cancelled" => "stop",
+        _ => "stop",
+    }
 }
 
 fn active_or_refreshed_credential(auth_store: &AuthStore) -> Result<OAuthCredential> {
@@ -1357,6 +2113,18 @@ fn json_response(status: u16, payload: serde_json::Value) -> HttpResponse {
     }
 }
 
+fn openai_error_response(status: u16, message: impl Into<String>, error_type: &str) -> HttpResponse {
+    json_response(
+        status,
+        json!({
+            "error": {
+                "message": message.into(),
+                "type": error_type,
+            }
+        }),
+    )
+}
+
 fn is_authorized(request: &HttpRequest, expected_api_key: &str) -> bool {
     if expected_api_key.is_empty() {
         return true;
@@ -1887,5 +2655,74 @@ mod tests {
             payload.get("status").and_then(Value::as_str),
             Some("completed")
         );
+    }
+
+    #[test]
+    fn parses_acp_model_route_without_runtime_override() {
+        let route = parse_acp_model_route("acp:codex").expect("route should parse");
+
+        assert_eq!(route.agent, AgentKind::Codex);
+        assert_eq!(route.requested_model, "acp:codex");
+        assert_eq!(route.runtime_model, None);
+    }
+
+    #[test]
+    fn parses_acp_model_route_with_runtime_override() {
+        let route = parse_acp_model_route("acp:claude:sonnet-4.5")
+            .expect("route should parse");
+
+        assert_eq!(route.agent, AgentKind::Claude);
+        assert_eq!(route.requested_model, "acp:claude:sonnet-4.5");
+        assert_eq!(route.runtime_model.as_deref(), Some("sonnet-4.5"));
+    }
+
+    #[test]
+    fn ignores_unknown_acp_agent_models() {
+        assert!(parse_acp_model_route("acp:unknown").is_none());
+    }
+
+    #[test]
+    fn builds_acp_prompt_text_from_messages_and_instructions() {
+        let payload = json!({
+            "instructions": "Follow repo conventions",
+            "messages": [
+                {"role": "system", "content": "Be terse"},
+                {"role": "user", "content": "Reply with OK"},
+                {"role": "assistant", "content": "Working on it"}
+            ]
+        });
+
+        let prompt = build_acp_prompt_text(&payload);
+
+        assert!(prompt.contains("Instructions:\nFollow repo conventions"));
+        assert!(prompt.contains("Conversation:\nSystem: Be terse"));
+        assert!(prompt.contains("User: Reply with OK"));
+        assert!(prompt.contains("Assistant: Working on it"));
+    }
+
+    #[test]
+    fn resolves_relative_acp_workspace_header_against_default_workspace() {
+        let workspace_root = std::env::temp_dir().join(format!("opengateway-acp-workspace-{}", now_millis()));
+        let nested = workspace_root.join(".factory");
+        std::fs::create_dir_all(&nested).expect("workspace fixture should be created");
+        let request = HttpRequest {
+            method: "POST".to_string(),
+            path: "/v1/chat/completions".to_string(),
+            headers: HashMap::from([(
+                ACP_WORKSPACE_HEADER.to_string(),
+                ".factory".to_string(),
+            )]),
+            header_list: vec![(
+                ACP_WORKSPACE_HEADER.to_string(),
+                ".factory".to_string(),
+            )],
+            body: Vec::new(),
+        };
+
+        let resolved = resolve_acp_workspace(&request, Some(&workspace_root))
+            .expect("workspace should resolve");
+
+        assert_eq!(resolved, nested);
+        let _ = std::fs::remove_dir_all(workspace_root);
     }
 }

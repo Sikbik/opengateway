@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use std::thread;
 use std::time::{Duration, Instant};
 
-const DEFAULT_BRIDGE_HOST: &str = "127.0.0.1";
+pub const DEFAULT_BRIDGE_HOST: &str = "127.0.0.1";
 const CODEX_BRIDGE_PORT: u16 = 42170;
 const CLAUDE_BRIDGE_PORT: u16 = 42171;
 
@@ -393,7 +393,7 @@ fn bridge_runtime_files(paths: &AppPaths, agent: AgentKind) -> BridgeRuntimeFile
     }
 }
 
-fn default_bridge_port(agent: AgentKind) -> u16 {
+pub fn default_bridge_port(agent: AgentKind) -> u16 {
     match agent {
         AgentKind::Codex => CODEX_BRIDGE_PORT,
         AgentKind::Claude => CLAUDE_BRIDGE_PORT,

@@ -45,7 +45,7 @@ const CREATE_NO_WINDOW: u32 = 0x08000000;
 const DETACHED_PROCESS: u32 = 0x00000008;
 const FACTORY_PREFERRED_MODEL: &str = "gpt-5.4(xhigh)";
 const FACTORY_PREFERRED_REASONING_EFFORT: &str = "xhigh";
-const DEFAULT_OPENAI_MODEL_CATALOG: [(&str, &str); 26] = [
+const DEFAULT_OPENAI_MODEL_CATALOG: [(&str, &str); 28] = [
     ("gpt-5.4", "GPT-5.4"),
     ("gpt-5.4(low)", "GPT-5.4 (Low)"),
     ("gpt-5.4(medium)", "GPT-5.4 (Medium)"),
@@ -72,6 +72,8 @@ const DEFAULT_OPENAI_MODEL_CATALOG: [(&str, &str); 26] = [
     ("gpt-5.1(high)", "GPT-5.1 (High)"),
     ("gpt-5", "GPT-5"),
     ("gpt-5(high)", "GPT-5 (High)"),
+    ("acp:codex", "ACP Codex"),
+    ("acp:claude", "ACP Claude"),
 ];
 
 #[derive(Debug, Parser)]
@@ -1070,6 +1072,7 @@ fn command_run(args: RunArgs) -> Result<()> {
 
     let api_key = resolve_proxy_api_key(&paths.api_key_file, &args.api_key)?;
     let model_ids = resolve_model_ids(&args.models);
+    let default_acp_workspace = resolve_default_acp_workspace();
     let pid = std::process::id() as i32;
     write_pid(&paths.pid_file, pid)?;
     runtime_log_info(format!("service starting (pid={pid})"));
@@ -1088,6 +1091,7 @@ fn command_run(args: RunArgs) -> Result<()> {
             per_client_rate: args.per_client_rate,
             per_client_burst: args.per_client_burst,
             models: model_ids,
+            default_acp_workspace,
         },
         auth_store,
     );
@@ -1547,6 +1551,29 @@ fn model_display_name(model_id: &str) -> String {
         .find(|(candidate, _)| *candidate == model_id)
         .map(|(_, display_name)| (*display_name).to_string())
         .unwrap_or_else(|| model_id.to_string())
+}
+
+fn resolve_default_acp_workspace() -> Option<PathBuf> {
+    if let Ok(raw) = std::env::var("OPENGATEWAY_WORKSPACE") {
+        let trimmed = raw.trim();
+        if !trimmed.is_empty() {
+            let configured = expand_user_path(Path::new(trimmed));
+            if configured.is_absolute() {
+                return Some(configured);
+            }
+            if let Ok(current_dir) = std::env::current_dir() {
+                return Some(current_dir.join(configured));
+            }
+            return Some(configured);
+        }
+    }
+
+    let current_dir = std::env::current_dir().ok()?;
+    if current_dir.join(".factory/droids").is_dir() || current_dir.join(".git").exists() {
+        Some(current_dir)
+    } else {
+        None
+    }
 }
 
 fn build_factory_config(base_url: &str, api_key: &str, model_ids: &[String]) -> Value {
