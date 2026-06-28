@@ -191,8 +191,13 @@ fn build_native_harness_snapshot(
     droid: DroidReadiness,
     codex: CodexReadiness,
 ) -> NativeHarnessSnapshot {
-    let mode_recommendation = if droid.issue.is_none() {
+    let factory_droid_ready = factory_desktop.installed
+        && factory_desktop.bundled_droid_path.is_some()
+        && droid.issue.is_none();
+    let mode_recommendation = if factory_droid_ready {
         "factory-droid-native"
+    } else if droid.issue.is_none() {
+        "droid-cli-native"
     } else if codex.issue.is_none() {
         "codex-app-server"
     } else {
@@ -712,6 +717,37 @@ mod tests {
         );
 
         assert_eq!(snapshot.mode_recommendation, "codex-app-server");
+        assert!(!snapshot.byok_required);
+    }
+
+    #[test]
+    fn recommends_droid_cli_when_factory_desktop_is_missing() {
+        let snapshot = build_native_harness_snapshot(
+            FactoryDesktopReadiness {
+                installed: false,
+                install_dir: None,
+                version: None,
+                bundled_droid_path: None,
+                issue: Some("Factory Desktop install was not found".to_string()),
+            },
+            DroidReadiness {
+                executable: Some("droid".to_string()),
+                version: Some("0.159.1".to_string()),
+                supports_exec: true,
+                supports_stream_jsonrpc: true,
+                supports_daemon_ipc: true,
+                issue: None,
+            },
+            CodexReadiness {
+                executable: Some("codex".to_string()),
+                version: Some("codex 26.623.5546".to_string()),
+                supports_app_server: true,
+                supports_generate_schema: true,
+                issue: None,
+            },
+        );
+
+        assert_eq!(snapshot.mode_recommendation, "droid-cli-native");
         assert!(!snapshot.byok_required);
     }
 

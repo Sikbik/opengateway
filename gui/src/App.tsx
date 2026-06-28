@@ -371,10 +371,15 @@ function App() {
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const mounted = useRef(true);
+  const refreshInFlight = useRef(false);
   const mode = runtimeMode();
   const deferredSearchQuery = useDeferredValue(searchQuery);
 
   async function refreshAll() {
+    if (refreshInFlight.current) {
+      return;
+    }
+    refreshInFlight.current = true;
     try {
       const nextSnapshot = await call<AppSnapshot>("load_snapshot");
       const nextLogs = await call<string[]>("tail_logs", { limit: 160 });
@@ -411,6 +416,8 @@ function App() {
         return;
       }
       setError(String(cause));
+    } finally {
+      refreshInFlight.current = false;
     }
   }
 
