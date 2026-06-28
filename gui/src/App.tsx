@@ -372,11 +372,13 @@ function App() {
   const [error, setError] = useState<string | null>(null);
   const mounted = useRef(true);
   const refreshInFlight = useRef(false);
+  const refreshQueued = useRef(false);
   const mode = runtimeMode();
   const deferredSearchQuery = useDeferredValue(searchQuery);
 
   async function refreshAll() {
     if (refreshInFlight.current) {
+      refreshQueued.current = true;
       return;
     }
     refreshInFlight.current = true;
@@ -418,6 +420,10 @@ function App() {
       setError(String(cause));
     } finally {
       refreshInFlight.current = false;
+      if (refreshQueued.current && mounted.current) {
+        refreshQueued.current = false;
+        void refreshAll();
+      }
     }
   }
 
