@@ -32,7 +32,7 @@ fn probe_factory_desktop_from_candidates(roots: Vec<PathBuf>) -> FactoryDesktopR
         }
     }
 
-    app_dirs.sort_by(compare_factory_app_dirs);
+    app_dirs.sort_by(|left, right| compare_factory_app_dirs(left, right));
     let Some(install_dir) = app_dirs.pop() else {
         return FactoryDesktopReadiness {
             installed: false,
@@ -44,12 +44,19 @@ fn probe_factory_desktop_from_candidates(roots: Vec<PathBuf>) -> FactoryDesktopR
     };
 
     let version = factory_app_version(&install_dir);
-    let bundled_droid = install_dir.join("resources").join("bin").join(droid_exe_name());
-    let bundled_droid_path = bundled_droid.exists().then(|| bundled_droid.display().to_string());
+    let bundled_droid = install_dir
+        .join("resources")
+        .join("bin")
+        .join(droid_exe_name());
+    let bundled_droid_path = bundled_droid
+        .is_file()
+        .then(|| bundled_droid.display().to_string());
     let issue = if bundled_droid_path.is_some() {
         None
     } else {
-        Some("Factory Desktop was found, but its bundled Droid executable was not found".to_string())
+        Some(
+            "Factory Desktop was found, but its bundled Droid executable was not found".to_string(),
+        )
     };
 
     FactoryDesktopReadiness {
@@ -89,24 +96,32 @@ fn env_path(name: &str) -> Option<PathBuf> {
 
 fn factory_app_version(path: &Path) -> Option<String> {
     let name = path.file_name()?.to_string_lossy();
-    name.strip_prefix("app-").map(|version| version.to_string())
+    let version = name.strip_prefix("app-")?;
+    parse_version_parts(version)?;
+    Some(version.to_string())
 }
 
-fn compare_factory_app_dirs(left: &PathBuf, right: &PathBuf) -> Ordering {
+fn compare_factory_app_dirs(left: &Path, right: &Path) -> Ordering {
     let left_version = factory_app_version(left).unwrap_or_default();
     let right_version = factory_app_version(right).unwrap_or_default();
     compare_version_like(&left_version, &right_version)
 }
 
 fn compare_version_like(left: &str, right: &str) -> Ordering {
-    let left_parts = version_parts(left);
-    let right_parts = version_parts(right);
+    let left_parts = parse_version_parts(left).unwrap_or_default();
+    let right_parts = parse_version_parts(right).unwrap_or_default();
     left_parts.cmp(&right_parts).then_with(|| left.cmp(right))
 }
 
-fn version_parts(raw: &str) -> Vec<u64> {
+fn parse_version_parts(raw: &str) -> Option<Vec<u64>> {
     raw.split('.')
-        .map(|part| part.parse::<u64>().unwrap_or(0))
+        .map(|part| {
+            if part.is_empty() {
+                None
+            } else {
+                part.parse::<u64>().ok()
+            }
+        })
         .collect()
 }
 
@@ -136,7 +151,10 @@ mod tests {
 
         assert!(readiness.installed);
         assert_eq!(readiness.version.as_deref(), Some("0.116.1"));
-        assert!(readiness.bundled_droid_path.unwrap().contains("app-0.116.1"));
+        assert!(readiness
+            .bundled_droid_path
+            .unwrap()
+            .contains("app-0.116.1"));
         assert_eq!(readiness.issue, None);
         fs::remove_dir_all(root).unwrap();
     }
@@ -167,6 +185,39 @@ mod tests {
             readiness.issue.as_deref(),
             Some("Factory Desktop was found, but its bundled Droid executable was not found")
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn ignores_invalid_factory_app_versions() {
+        let root = temp_root("factory-desktop-invalid-versions");
+        let valid = root.join("app-1.2.3").join("resources").join("bin");
+        fs::create_dir_all(&valid).unwrap();
+        fs::write(valid.join(droid_exe_name()), "").unwrap();
+
+        for name in [
+            "app-beta",
+            "app-999.x",
+            "app-1.2-preview",
+            "app-",
+            "app-1..2",
+        ] {
+            fs::create_dir_all(root.join(name).join("resources").join("bin")).unwrap();
+            fs::write(
+                root.join(name)
+                    .join("resources")
+                    .join("bin")
+                    .join(droid_exe_name()),
+                "",
+            )
+            .unwrap();
+        }
+
+        let readiness = probe_factory_desktop_from_candidates(vec![root.clone()]);
+
+        assert!(readiness.installed);
+        assert_eq!(readiness.version.as_deref(), Some("1.2.3"));
+        assert!(readiness.bundled_droid_path.unwrap().contains("app-1.2.3"));
         fs::remove_dir_all(root).unwrap();
     }
 
