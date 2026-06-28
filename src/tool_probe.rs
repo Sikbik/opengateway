@@ -126,7 +126,7 @@ fn codex_app_server_supported(help: &str) -> bool {
 }
 
 fn codex_generate_schema_supported(help: &str) -> bool {
-    help.contains("generate-schema")
+    help.contains("generate-json-schema") || help.contains("generate-schema")
 }
 
 #[cfg(test)]
@@ -148,7 +148,7 @@ Usage: droid daemon --listen <LISTEN>
 
     const CODEX_APP_SERVER_HELP: &str = r#"
 Usage: codex app-server [OPTIONS]
-      --generate-schema
+      --generate-json-schema
 "#;
 
     #[test]
@@ -166,6 +166,13 @@ Usage: codex app-server [OPTIONS]
     fn parses_codex_app_server_support() {
         assert!(codex_app_server_supported(CODEX_APP_SERVER_HELP));
         assert!(codex_generate_schema_supported(CODEX_APP_SERVER_HELP));
+    }
+
+    #[test]
+    fn rejects_codex_app_server_help_without_schema_support() {
+        assert!(!codex_generate_schema_supported(
+            "Usage: codex app-server [OPTIONS]"
+        ));
     }
 
     #[test]
