@@ -35,7 +35,9 @@ pub fn probe_droid_cli(preferred: Option<PathBuf>) -> DroidReadiness {
     let supports_stream_jsonrpc = exec_help
         .as_deref()
         .is_some_and(droid_stream_jsonrpc_supported);
-    let supports_daemon_ipc = daemon_help.as_deref().is_some_and(droid_daemon_ipc_supported);
+    let supports_daemon_ipc = daemon_help
+        .as_deref()
+        .is_some_and(droid_daemon_ipc_supported);
     let issue = if version.is_none() {
         Some("Droid CLI was not found or could not be executed".to_string())
     } else if !supports_exec {
@@ -63,7 +65,9 @@ pub fn probe_codex_cli() -> CodexReadiness {
     let version = command_stdout(&executable, &["--version"]).ok();
     let app_server_help = command_stdout(&executable, &["app-server", "--help"]).ok();
 
-    let supports_app_server = app_server_help.as_deref().is_some_and(codex_app_server_supported);
+    let supports_app_server = app_server_help
+        .as_deref()
+        .is_some_and(codex_app_server_supported);
     let supports_generate_schema = app_server_help
         .as_deref()
         .is_some_and(codex_generate_schema_supported);

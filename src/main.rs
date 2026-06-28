@@ -832,8 +832,8 @@ fn command_start(args: StartArgs) -> Result<()> {
     let timeout = args.timeout.max(0.1);
     let deadline = Instant::now() + Duration::from_secs_f64(timeout);
     while Instant::now() < deadline {
-        let pid = read_pid(&paths.pid_file)
-            .or_else(|| child.as_ref().map(|process| process.id() as i32));
+        let pid =
+            read_pid(&paths.pid_file).or_else(|| child.as_ref().map(|process| process.id() as i32));
         let http_ready = is_http_ready(&args.host, args.port, Duration::from_millis(500));
         let port_ready = is_port_open(&args.host, args.port, Duration::from_millis(500));
         if http_ready || (port_ready && pid.map(pid_running).unwrap_or(false)) {
@@ -858,7 +858,8 @@ fn command_start(args: StartArgs) -> Result<()> {
         thread::sleep(Duration::from_millis(200));
     }
 
-    let pid = read_pid(&paths.pid_file).or_else(|| child.as_ref().map(|process| process.id() as i32));
+    let pid =
+        read_pid(&paths.pid_file).or_else(|| child.as_ref().map(|process| process.id() as i32));
     let port_ready = is_port_open(&args.host, args.port, Duration::from_millis(500));
     if port_ready && pid.map(pid_running).unwrap_or(false) {
         let pid = pid.unwrap_or_default();
@@ -2028,15 +2029,15 @@ fn pid_running(pid: i32) -> bool {
 
     #[cfg(not(windows))]
     {
-    Command::new("kill")
-        .arg("-0")
-        .arg(pid.to_string())
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|status| status.success())
-        .unwrap_or(false)
+        Command::new("kill")
+            .arg("-0")
+            .arg(pid.to_string())
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
     }
 }
 
@@ -2066,20 +2067,20 @@ fn send_signal(pid: i32, signal: &str) -> Result<()> {
 
     #[cfg(not(windows))]
     {
-    let status = Command::new("kill")
-        .arg(signal)
-        .arg(pid.to_string())
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .with_context(|| format!("failed to execute kill for pid {pid}"))?;
+        let status = Command::new("kill")
+            .arg(signal)
+            .arg(pid.to_string())
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .with_context(|| format!("failed to execute kill for pid {pid}"))?;
 
-    if status.success() {
-        Ok(())
-    } else {
-        Err(anyhow!("kill {} {} failed", signal, pid))
-    }
+        if status.success() {
+            Ok(())
+        } else {
+            Err(anyhow!("kill {} {} failed", signal, pid))
+        }
     }
 }
 
