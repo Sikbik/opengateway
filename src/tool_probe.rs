@@ -4,7 +4,7 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-const PROBE_COMMAND_TIMEOUT: Duration = Duration::from_secs(2);
+const PROBE_COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
 const PROBE_COMMAND_POLL_INTERVAL: Duration = Duration::from_millis(25);
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -236,7 +236,7 @@ Usage: codex app-server [OPTIONS]
                 "tool_probe::tests::tool_probe_timeout_sleep_helper",
                 "--nocapture",
             ],
-            Some((TEST_SLEEP_ENV, "5000")),
+            Some((TEST_SLEEP_ENV, "6000")),
         )
         .unwrap_err();
 
