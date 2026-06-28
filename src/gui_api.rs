@@ -7,7 +7,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use crate::factory_desktop::FactoryDesktopReadiness;
 use crate::paths::{build_factory_paths, build_paths};
+use crate::tool_probe::{CodexReadiness, DroidReadiness};
 
 const GATEWAY_URL: &str = "http://127.0.0.1:42069";
 const WORKSPACE_DROIDS_RELATIVE: &str = ".factory/droids";
@@ -20,6 +22,7 @@ pub struct AppSnapshot {
     environment: EnvironmentSnapshot,
     gateway: GatewaySnapshot,
     factory: FactorySnapshot,
+    native_harness: NativeHarnessSnapshot,
     models: Vec<ModelOption>,
     droids: Vec<DroidRecord>,
 }
@@ -67,6 +70,16 @@ pub struct FactorySnapshot {
     session_default_model: Option<String>,
     mission_models: MissionModels,
     issues: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeHarnessSnapshot {
+    factory_desktop: FactoryDesktopReadiness,
+    droid: DroidReadiness,
+    codex: CodexReadiness,
+    mode_recommendation: &'static str,
+    byok_required: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -152,6 +165,14 @@ fn load_snapshot() -> Result<AppSnapshot> {
         .unwrap_or_default();
 
     let factory = read_factory_snapshot(&factory_paths);
+    let factory_desktop = crate::factory_desktop::probe_factory_desktop();
+    let preferred_droid = factory_desktop
+        .bundled_droid_path
+        .as_ref()
+        .map(PathBuf::from);
+    let droid = crate::tool_probe::probe_droid_cli(preferred_droid);
+    let codex = crate::tool_probe::probe_codex_cli();
+    let native_harness = build_native_harness_snapshot(factory_desktop, droid, codex);
 
     Ok(AppSnapshot {
         generated_at: now_millis(),
@@ -159,9 +180,32 @@ fn load_snapshot() -> Result<AppSnapshot> {
         environment: environment_snapshot(),
         gateway: read_gateway_snapshot(&paths, &factory),
         factory,
+        native_harness,
         models: read_model_catalog(),
         droids: merge_droids(workspace_droids, machine_droids),
     })
+}
+
+fn build_native_harness_snapshot(
+    factory_desktop: FactoryDesktopReadiness,
+    droid: DroidReadiness,
+    codex: CodexReadiness,
+) -> NativeHarnessSnapshot {
+    let mode_recommendation = if droid.issue.is_none() {
+        "factory-droid-native"
+    } else if codex.issue.is_none() {
+        "codex-app-server"
+    } else {
+        "setup-required"
+    };
+
+    NativeHarnessSnapshot {
+        factory_desktop,
+        droid,
+        codex,
+        mode_recommendation,
+        byok_required: false,
+    }
 }
 
 fn environment_snapshot() -> EnvironmentSnapshot {
@@ -600,4 +644,74 @@ fn now_millis() -> i64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default();
     duration.as_millis() as i64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recommends_factory_droid_when_droid_is_ready() {
+        let snapshot = build_native_harness_snapshot(
+            FactoryDesktopReadiness {
+                installed: true,
+                install_dir: Some("C:/Users/example/AppData/Local/Factory/app-0.116.1".to_string()),
+                version: Some("0.116.1".to_string()),
+                bundled_droid_path: Some(
+                    "C:/Users/example/AppData/Local/Factory/app-0.116.1/resources/bin/droid.exe"
+                        .to_string(),
+                ),
+                issue: None,
+            },
+            DroidReadiness {
+                executable: Some("droid".to_string()),
+                version: Some("0.159.1".to_string()),
+                supports_exec: true,
+                supports_stream_jsonrpc: true,
+                supports_daemon_ipc: true,
+                issue: None,
+            },
+            CodexReadiness {
+                executable: Some("codex".to_string()),
+                version: Some("codex 26.623.5546".to_string()),
+                supports_app_server: true,
+                supports_generate_schema: true,
+                issue: None,
+            },
+        );
+
+        assert_eq!(snapshot.mode_recommendation, "factory-droid-native");
+        assert!(!snapshot.byok_required);
+    }
+
+    #[test]
+    fn recommends_codex_when_droid_is_not_ready() {
+        let snapshot = build_native_harness_snapshot(
+            FactoryDesktopReadiness {
+                installed: false,
+                install_dir: None,
+                version: None,
+                bundled_droid_path: None,
+                issue: Some("Factory Desktop install was not found".to_string()),
+            },
+            DroidReadiness {
+                executable: Some("droid".to_string()),
+                version: None,
+                supports_exec: false,
+                supports_stream_jsonrpc: false,
+                supports_daemon_ipc: false,
+                issue: Some("Droid CLI was not found or could not be executed".to_string()),
+            },
+            CodexReadiness {
+                executable: Some("codex".to_string()),
+                version: Some("codex 26.623.5546".to_string()),
+                supports_app_server: true,
+                supports_generate_schema: true,
+                issue: None,
+            },
+        );
+
+        assert_eq!(snapshot.mode_recommendation, "codex-app-server");
+        assert!(!snapshot.byok_required);
+    }
 }
