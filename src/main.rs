@@ -4,6 +4,7 @@ mod gui_api;
 mod oauth;
 mod paths;
 mod service;
+mod tool_probe;
 
 use anyhow::{anyhow, Context, Result};
 use auth_store::{AuthStore, NewCredential};
