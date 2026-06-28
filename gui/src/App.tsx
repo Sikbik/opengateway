@@ -124,6 +124,10 @@ function formatLogTimestamp(timestamp: number | null) {
   });
 }
 
+function readinessLabel(issue: string | null): string {
+  return issue ? "Needs setup" : "Ready";
+}
+
 function parseLogLine(line: string) {
   const match = line.match(/^\[(\d{13})\]\s+(.*)$/);
   if (!match) {
@@ -944,6 +948,47 @@ function App() {
                   <div>
                     <dt>Custom inventory</dt>
                     <dd>{snapshot?.factory.settingsCustomModelCount ?? 0}</dd>
+                  </div>
+                </dl>
+              </div>
+
+              <div className="status-board__lane">
+                <p className="eyebrow">Native Harness</p>
+                <h3>
+                  {snapshot?.nativeHarness.modeRecommendation ?? "setup-required"}
+                </h3>
+                <dl className="mini-facts">
+                  <div>
+                    <dt>Factory Desktop</dt>
+                    <dd>
+                      {readinessLabel(
+                        snapshot?.nativeHarness.factoryDesktop.issue ?? "missing",
+                      )}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>Droid</dt>
+                    <dd>
+                      {readinessLabel(
+                        snapshot?.nativeHarness.droid.issue ?? "missing",
+                      )}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>Codex app-server</dt>
+                    <dd>
+                      {readinessLabel(
+                        snapshot?.nativeHarness.codex.issue ?? "missing",
+                      )}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>API key</dt>
+                    <dd>
+                      {snapshot?.nativeHarness.byokRequired
+                        ? "BYOK"
+                        : "No API key"}
+                    </dd>
                   </div>
                 </dl>
               </div>
