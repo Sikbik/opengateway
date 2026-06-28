@@ -102,13 +102,25 @@ fn default_codex_executable() -> PathBuf {
 }
 
 fn command_stdout(executable: &Path, args: &[&str]) -> Result<String, String> {
-    let mut child = Command::new(executable)
+    command_stdout_with_env(executable, args, None)
+}
+
+fn command_stdout_with_env(
+    executable: &Path,
+    args: &[&str],
+    env: Option<(&str, &str)>,
+) -> Result<String, String> {
+    let mut command = Command::new(executable);
+    command
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|err| err.to_string())?;
+        .stderr(Stdio::piped());
+    if let Some((name, value)) = env {
+        command.env(name, value);
+    }
+
+    let mut child = command.spawn().map_err(|err| err.to_string())?;
 
     let started_at = Instant::now();
     loop {
@@ -165,6 +177,8 @@ fn codex_generate_schema_supported(help: &str) -> bool {
 mod tests {
     use super::*;
 
+    const TEST_SLEEP_ENV: &str = "OPENGATEWAY_TOOL_PROBE_TEST_SLEEP_MS";
+
     const DROID_EXEC_HELP: &str = r#"
 Run a prompt
       --input-format <INPUT_FORMAT>
@@ -214,9 +228,27 @@ Usage: codex app-server [OPTIONS]
 
     #[test]
     fn command_stdout_times_out_long_running_commands() {
-        let err = command_stdout(Path::new("sleep"), &["5"]).unwrap_err();
+        let current_exe = std::env::current_exe().unwrap();
+        let err = command_stdout_with_env(
+            &current_exe,
+            &[
+                "--exact",
+                "tool_probe::tests::tool_probe_timeout_sleep_helper",
+                "--nocapture",
+            ],
+            Some((TEST_SLEEP_ENV, "5000")),
+        )
+        .unwrap_err();
 
         assert!(err.contains("timed out"));
+    }
+
+    #[test]
+    fn tool_probe_timeout_sleep_helper() {
+        if let Ok(raw) = std::env::var(TEST_SLEEP_ENV) {
+            let sleep_ms = raw.parse::<u64>().unwrap();
+            thread::sleep(Duration::from_millis(sleep_ms));
+        }
     }
 
     #[test]
