@@ -1,4 +1,5 @@
 mod auth_store;
+mod factory_desktop;
 mod gui_api;
 mod oauth;
 mod paths;
