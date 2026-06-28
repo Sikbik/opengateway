@@ -1,6 +1,11 @@
 use serde::Serialize;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
+
+const PROBE_COMMAND_TIMEOUT: Duration = Duration::from_secs(2);
+const PROBE_COMMAND_POLL_INTERVAL: Duration = Duration::from_millis(25);
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -97,11 +102,34 @@ fn default_codex_executable() -> PathBuf {
 }
 
 fn command_stdout(executable: &Path, args: &[&str]) -> Result<String, String> {
-    let output = Command::new(executable)
+    let mut child = Command::new(executable)
         .args(args)
-        .output()
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(|err| err.to_string())?;
 
+    let started_at = Instant::now();
+    loop {
+        if child.try_wait().map_err(|err| err.to_string())?.is_some() {
+            break;
+        }
+
+        if started_at.elapsed() >= PROBE_COMMAND_TIMEOUT {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(format!(
+                "{} timed out after {} seconds",
+                executable.display(),
+                PROBE_COMMAND_TIMEOUT.as_secs()
+            ));
+        }
+
+        thread::sleep(PROBE_COMMAND_POLL_INTERVAL);
+    }
+
+    let output = child.wait_with_output().map_err(|err| err.to_string())?;
     if output.status.success() {
         Ok(String::from_utf8_lossy(&output.stdout).to_string())
     } else {
@@ -182,6 +210,13 @@ Usage: codex app-server [OPTIONS]
     #[test]
     fn rejects_incomplete_droid_exec_help() {
         assert!(!droid_stream_jsonrpc_supported("--input-format text"));
+    }
+
+    #[test]
+    fn command_stdout_times_out_long_running_commands() {
+        let err = command_stdout(Path::new("sleep"), &["5"]).unwrap_err();
+
+        assert!(err.contains("timed out"));
     }
 
     #[test]

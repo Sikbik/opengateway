@@ -714,4 +714,35 @@ mod tests {
         assert_eq!(snapshot.mode_recommendation, "codex-app-server");
         assert!(!snapshot.byok_required);
     }
+
+    #[test]
+    fn recommends_setup_when_droid_and_codex_are_not_ready() {
+        let snapshot = build_native_harness_snapshot(
+            FactoryDesktopReadiness {
+                installed: false,
+                install_dir: None,
+                version: None,
+                bundled_droid_path: None,
+                issue: Some("Factory Desktop install was not found".to_string()),
+            },
+            DroidReadiness {
+                executable: Some("droid".to_string()),
+                version: None,
+                supports_exec: false,
+                supports_stream_jsonrpc: false,
+                supports_daemon_ipc: false,
+                issue: Some("Droid CLI was not found or could not be executed".to_string()),
+            },
+            CodexReadiness {
+                executable: Some("codex".to_string()),
+                version: None,
+                supports_app_server: false,
+                supports_generate_schema: false,
+                issue: Some("Codex CLI was not found or could not be executed".to_string()),
+            },
+        );
+
+        assert_eq!(snapshot.mode_recommendation, "setup-required");
+        assert!(!snapshot.byok_required);
+    }
 }
