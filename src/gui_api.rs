@@ -471,6 +471,12 @@ fn read_factory_snapshot(factory_paths: &crate::paths::FactoryPaths) -> FactoryS
             ));
         }
     }
+    if let Some(issue) = recent_session_model_pin_issue(
+        &factory_paths.home_dir.join("sessions"),
+        session_default_model.as_deref(),
+    ) {
+        issues.push(issue);
+    }
 
     FactorySnapshot {
         home_path: factory_paths.home_dir.display().to_string(),
@@ -524,6 +530,79 @@ fn read_json_file(path: &Path) -> Value {
         .ok()
         .and_then(|content| serde_json::from_str::<Value>(&content).ok())
         .unwrap_or_else(|| Value::Object(Default::default()))
+}
+
+fn recent_session_model_pin_issue(
+    sessions_dir: &Path,
+    session_default_model: Option<&str>,
+) -> Option<String> {
+    let session_default_model = session_default_model?.trim();
+    if session_default_model.is_empty() {
+        return None;
+    }
+
+    let mut files = Vec::new();
+    for project_entry in fs::read_dir(sessions_dir).ok()?.flatten() {
+        let project_path = project_entry.path();
+        if !project_path.is_dir() {
+            continue;
+        }
+        for file_entry in fs::read_dir(project_path).ok()?.flatten() {
+            let file_path = file_entry.path();
+            if file_path.extension().and_then(|value| value.to_str()) != Some("jsonl") {
+                continue;
+            }
+            let modified = file_entry
+                .metadata()
+                .ok()
+                .and_then(|metadata| metadata.modified().ok())
+                .unwrap_or(UNIX_EPOCH);
+            files.push((modified, file_path));
+        }
+    }
+    files.sort_by(|left, right| right.0.cmp(&left.0));
+
+    for (_, path) in files.into_iter().take(20) {
+        let Some(model_id) = latest_assistant_model_id(&path) else {
+            continue;
+        };
+        if model_id != session_default_model {
+            let name = path
+                .file_name()
+                .map(|value| value.to_string_lossy().to_string())
+                .unwrap_or_else(|| "session".to_string());
+            return Some(format!(
+                "Recent Factory session `{name}` is pinned to `{model_id}`; start a new session to use `{session_default_model}`."
+            ));
+        }
+    }
+
+    None
+}
+
+fn latest_assistant_model_id(path: &Path) -> Option<String> {
+    let raw = fs::read_to_string(path).ok()?;
+    let mut latest = None;
+    for line in raw.lines() {
+        let Ok(value) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        let Some(message) = value.get("message") else {
+            continue;
+        };
+        if message.get("role").and_then(Value::as_str) != Some("assistant") {
+            continue;
+        }
+        if let Some(model_id) = message
+            .get("modelId")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            latest = Some(model_id.to_string());
+        }
+    }
+    latest
 }
 
 fn detect_workspace_root() -> Option<PathBuf> {
@@ -734,6 +813,30 @@ mod tests {
         assert_eq!(option.model, "custom:GPT-5.4-(XHigh)-24");
         assert_eq!(option.id.as_deref(), Some("custom:GPT-5.4-(XHigh)-24"));
         assert_eq!(option.display_name, "GPT-5.4 (XHigh)");
+    }
+
+    #[test]
+    fn warns_when_recent_factory_session_uses_old_model_pin() {
+        let dir = temp_gateway_dir("stale-session-model");
+        let sessions_dir = dir.join("sessions");
+        let project_dir = sessions_dir.join("--wsl.localhost-Ubuntu-home-stache-projects-demo");
+        fs::create_dir_all(&project_dir).unwrap();
+        let session_file = project_dir.join("session.jsonl");
+        fs::write(
+            &session_file,
+            concat!(
+                "{\"type\":\"session_start\",\"id\":\"session\",\"cwd\":\"demo\"}\n",
+                "{\"type\":\"message\",\"message\":{\"role\":\"assistant\",\"modelId\":\"custom:GPT-5.4-(XHigh)-4\",\"content\":[{\"type\":\"text\",\"text\":\"ok\"}]}}\n"
+            ),
+        )
+        .unwrap();
+
+        assert_eq!(
+            recent_session_model_pin_issue(&sessions_dir, Some("custom:GPT-5.5-26")).as_deref(),
+            Some("Recent Factory session `session.jsonl` is pinned to `custom:GPT-5.4-(XHigh)-4`; start a new session to use `custom:GPT-5.5-26`.")
+        );
+
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
