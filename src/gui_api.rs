@@ -560,7 +560,7 @@ fn recent_session_model_pin_issue(
             files.push((modified, file_path));
         }
     }
-    files.sort_by(|left, right| right.0.cmp(&left.0));
+    files.sort_by_key(|entry| std::cmp::Reverse(entry.0));
 
     for (_, path) in files.into_iter().take(20) {
         let Some(model_id) = latest_assistant_model_id(&path) else {

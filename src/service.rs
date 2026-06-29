@@ -824,10 +824,10 @@ fn extract_response_object_from_sse(body: &[u8]) -> Option<Vec<u8>> {
                     response_object = response;
                 }
             }
-            "response.completed" | "response.failed" | "response.incomplete" => {
-                if response.is_some() {
-                    response_object = response;
-                }
+            "response.completed" | "response.failed" | "response.incomplete"
+                if response.is_some() =>
+            {
+                response_object = response;
             }
             _ => {}
         }
