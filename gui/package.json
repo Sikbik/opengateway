@@ -3,6 +3,9 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
+  "engines": {
+    "node": ">=20.19.0"
+  },
   "scripts": {
     "dev": "npm run web",
     "web": "vite --host 127.0.0.1 --port 1420",
@@ -15,16 +18,22 @@
     "tauri": "tauri"
   },
   "dependencies": {
-    "@tauri-apps/api": "^2.10.1",
-    "react": "^18.3.1",
-    "react-dom": "^18.3.1"
+    "@tauri-apps/api": "2.10.1",
+    "react": "18.3.1",
+    "react-dom": "18.3.1"
   },
   "devDependencies": {
-    "@tauri-apps/cli": "^2.10.0",
-    "@types/react": "^18.3.20",
-    "@types/react-dom": "^18.3.7",
-    "@vitejs/plugin-react": "^5.0.4",
-    "typescript": "^5.9.3",
-    "vite": "^7.1.10"
+    "@tauri-apps/cli": "2.10.1",
+    "@types/react": "18.3.28",
+    "@types/react-dom": "18.3.7",
+    "@vitejs/plugin-react": "5.1.4",
+    "typescript": "5.9.3",
+    "vite": "7.3.5"
+  },
+  "overrides": {
+    "@babel/core": "7.29.6",
+    "esbuild": "0.28.1",
+    "picomatch": "4.0.4",
+    "postcss": "8.5.10"
   }
 }

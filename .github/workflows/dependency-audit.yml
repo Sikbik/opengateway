@@ -54,10 +54,21 @@ jobs:
           cargo -V
 
       - name: Install cargo-audit
-        run: cargo install cargo-audit --locked
+        run: cargo install cargo-audit --version 0.22.2 --locked
+
+      - name: Verify inactive HTTP/3 dependencies stay inactive
+        run: |
+          set -euo pipefail
+          if cargo tree --locked --target all --edges normal | grep -E '(^| )quinn v|(^| )quinn-proto v|(^| )h3-quinn v|(^| )rand v'; then
+            echo "::error::A reqwest HTTP/3/QUIC dependency is active. Remove the cargo-audit ignore and audit the active graph before shipping."
+            exit 1
+          fi
 
       - name: Audit root Rust dependencies
-        run: cargo audit
+        # reqwest 0.12 locks optional HTTP/3/QUIC packages even when the http3
+        # feature is inactive. The graph check above keeps these exceptions narrow
+        # until quinn-proto 0.11.15 satisfies the local 7-day package-age rule.
+        run: cargo audit --ignore RUSTSEC-2026-0185 --ignore RUSTSEC-2026-0097
 
       - name: Audit GUI Rust dependencies
         working-directory: gui/src-tauri

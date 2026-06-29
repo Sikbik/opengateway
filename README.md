@@ -64,6 +64,8 @@ opengateway status
 opengateway logs -f
 opengateway doctor
 opengateway self-test
+opengateway probe-generation
+opengateway probe-droid
 opengateway login
 opengateway login headless
 opengateway show-key
@@ -72,9 +74,26 @@ opengateway sync-factory
 
 ## Factory Droid
 
-1. Restart `droid` if it is already running.
-2. Open the Factory model picker.
-3. Select one of the custom `GPT-*` entries added by `opengateway setup`.
+`opengateway setup` and `opengateway sync-factory` configure Factory Desktop for the local gateway. The preferred default is `GPT-5.5` with `Extra High` reasoning.
+
+1. Run `opengateway setup`, or `opengateway sync-factory` if auth is already set up.
+2. Restart Factory Desktop or start a new Factory session.
+3. In the Factory model picker, select the custom `GPT-5.5` entry if the active session did not pick it automatically.
+
+Factory stores model selection on existing sessions. If an older session keeps answering as a previous model, start a new session after running `opengateway sync-factory`.
+
+Use the probes to verify the bridge from the command line:
+
+```bash
+opengateway probe-generation
+opengateway probe-droid
+```
+
+`probe-generation` verifies the OpenAI-compatible gateway path. `probe-droid` verifies Factory's bundled Droid CLI can call the gateway and write a Factory session for the current workspace.
+
+OpenGateway exposes `GPT-5.5 Fast` as a selectable custom model. It routes to the ChatGPT/Codex account backend as `gpt-5.5` with `service_tier: "priority"` because the backend does not accept literal `gpt-5.5-fast` model requests.
+
+Factory's `/fast` slash command only toggles Factory built-in model IDs, not BYOK custom models. To use fast mode through OpenGateway, select `GPT-5.5 Fast` in Factory's model picker or pass that custom model to the Droid CLI.
 
 Repo droids and machine droids are separate:
 - repo droids: `<workspace>/.factory/droids`
@@ -157,7 +176,7 @@ To publish those builds to GitHub Releases:
 Workflow file:
 - `.github/workflows/desktop-artifacts.yml`
 
-The packaged Windows build bundles a native `opengateway.exe` backend and uses the WebView2 bootstrapper installer. If a default WSL environment already has both `~/.local/bin/opengateway` and `~/.factory`, the GUI prefers that WSL backend automatically; otherwise it falls back to the bundled Windows backend. That keeps the installer much smaller, but Windows may need internet access if WebView2 is not already present.
+The packaged Windows build bundles a native `opengateway.exe` backend and uses the WebView2 bootstrapper installer. Windows runs the bundled backend by default so Factory Desktop setup reads and writes Windows Factory state. WSL is only used when explicitly requested with `OPENGATEWAY_WSL_BRIDGE`, `OPENGATEWAY_WSL_DISTRO`, `OPENGATEWAY_WSL_WORKSPACE`, or a Linux-looking `OPENGATEWAY_WORKSPACE`.
 
 ## Paths
 

@@ -1,26 +1,36 @@
 mod auth_store;
+mod droid_files;
+mod droid_smoke;
+mod factory_config;
+mod factory_desktop;
+mod generation_probe;
 mod gui_api;
 mod oauth;
 mod paths;
 mod service;
+mod tool_probe;
 
 use anyhow::{anyhow, Context, Result};
 use auth_store::{AuthStore, NewCredential};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
 use clap::{Parser, Subcommand, ValueEnum};
+use factory_config::{
+    build_factory_config, factory_settings_needs_sync, resolve_model_ids, sync_factory_files,
+    FactorySyncResult,
+};
 use oauth::LoginMode;
 use paths::{build_paths, AppPaths};
-use rand::Rng;
 use reqwest::blocking::Client;
-use serde_json::{json, Value};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::VecDeque;
 #[cfg(windows)]
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
+#[cfg(windows)]
+use std::os::windows::ffi::OsStrExt;
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -42,36 +52,6 @@ const DEFAULT_PER_CLIENT_BURST: usize = 0;
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 #[cfg(windows)]
 const DETACHED_PROCESS: u32 = 0x00000008;
-const FACTORY_PREFERRED_MODEL: &str = "gpt-5.4(xhigh)";
-const FACTORY_PREFERRED_REASONING_EFFORT: &str = "xhigh";
-const DEFAULT_OPENAI_MODEL_CATALOG: [(&str, &str); 26] = [
-    ("gpt-5.4", "GPT-5.4"),
-    ("gpt-5.4(low)", "GPT-5.4 (Low)"),
-    ("gpt-5.4(medium)", "GPT-5.4 (Medium)"),
-    ("gpt-5.4(high)", "GPT-5.4 (High)"),
-    ("gpt-5.4(xhigh)", "GPT-5.4 (XHigh)"),
-    ("gpt-5.3-codex", "GPT-5.3 Codex"),
-    ("gpt-5.3-codex-spark", "GPT-5.3 Codex Spark"),
-    ("gpt-5.3-codex(high)", "GPT-5.3 Codex (High)"),
-    ("gpt-5.3-codex(xhigh)", "GPT-5.3 Codex (XHigh)"),
-    ("gpt-5.2-codex", "GPT-5.2 Codex"),
-    ("gpt-5.2-codex(high)", "GPT-5.2 Codex (High)"),
-    ("gpt-5.2-codex(xhigh)", "GPT-5.2 Codex (XHigh)"),
-    ("gpt-5.1-codex-max", "GPT-5.1 Codex Max"),
-    ("gpt-5.1-codex-max(high)", "GPT-5.1 Codex Max (High)"),
-    ("gpt-5.1-codex-max(xhigh)", "GPT-5.1 Codex Max (XHigh)"),
-    ("gpt-5.1-codex", "GPT-5.1 Codex"),
-    ("gpt-5.1-codex-mini", "GPT-5.1 Codex Mini"),
-    ("gpt-5-codex", "GPT-5 Codex"),
-    ("gpt-5-codex-mini", "GPT-5 Codex Mini"),
-    ("gpt-5.2", "GPT-5.2"),
-    ("gpt-5.2(high)", "GPT-5.2 (High)"),
-    ("gpt-5.2(xhigh)", "GPT-5.2 (XHigh)"),
-    ("gpt-5.1", "GPT-5.1"),
-    ("gpt-5.1(high)", "GPT-5.1 (High)"),
-    ("gpt-5", "GPT-5"),
-    ("gpt-5(high)", "GPT-5 (High)"),
-];
 
 #[derive(Debug, Parser)]
 #[command(name = "opengateway")]
@@ -97,6 +77,10 @@ enum Commands {
     Login(LoginArgs),
     ShowKey(ShowKeyArgs),
     SelfTest(SelfTestArgs),
+    #[command(name = "probe-generation")]
+    ProbeGeneration(ProbeGenerationArgs),
+    #[command(name = "probe-droid")]
+    ProbeDroid,
     FactoryConfig(FactoryConfigArgs),
     Doctor(DoctorArgs),
     #[command(name = "gui-snapshot", hide = true)]
@@ -109,6 +93,12 @@ enum Commands {
     GuiStop,
     #[command(name = "gui-doctor", hide = true)]
     GuiDoctor,
+    #[command(name = "gui-login", hide = true)]
+    GuiLogin,
+    #[command(name = "gui-probe-generation", hide = true)]
+    GuiProbeGeneration,
+    #[command(name = "gui-probe-droid", hide = true)]
+    GuiProbeDroid,
     #[command(name = "gui-sync-factory", hide = true)]
     GuiSyncFactory,
     #[command(name = "gui-set-droid-model", hide = true)]
@@ -347,6 +337,20 @@ struct SelfTestArgs {
 }
 
 #[derive(Debug, clap::Args)]
+struct ProbeGenerationArgs {
+    #[arg(long, default_value = DEFAULT_FRONT_HOST)]
+    host: String,
+    #[arg(long, default_value_t = DEFAULT_FRONT_PORT)]
+    port: u16,
+    #[arg(long, default_value = "")]
+    api_key: String,
+    #[arg(long, default_value = "")]
+    model: String,
+    #[arg(long, default_value_t = 120.0)]
+    timeout: f64,
+}
+
+#[derive(Debug, clap::Args)]
 struct FactoryConfigArgs {
     #[arg(long, default_value = "http://localhost:42069")]
     base_url: String,
@@ -413,11 +417,17 @@ fn main() {
 }
 
 pub(crate) fn runtime_log_info(message: impl AsRef<str>) {
-    println!("[{}] {}", runtime_log_timestamp_ms(), message.as_ref());
+    let line = format!("[{}] {}", runtime_log_timestamp_ms(), message.as_ref());
+    #[cfg(windows)]
+    append_runtime_log_line(&line);
+    println!("{line}");
 }
 
 pub(crate) fn runtime_log_error(message: impl AsRef<str>) {
-    eprintln!("[{}] {}", runtime_log_timestamp_ms(), message.as_ref());
+    let line = format!("[{}] {}", runtime_log_timestamp_ms(), message.as_ref());
+    #[cfg(windows)]
+    append_runtime_log_line(&line);
+    eprintln!("{line}");
 }
 
 fn runtime_log_timestamp_ms() -> u128 {
@@ -425,6 +435,23 @@ fn runtime_log_timestamp_ms() -> u128 {
         .duration_since(UNIX_EPOCH)
         .map(|value| value.as_millis())
         .unwrap_or(0)
+}
+
+#[cfg(windows)]
+fn append_runtime_log_line(line: &str) {
+    let Ok(paths) = build_paths() else {
+        return;
+    };
+    if let Some(parent) = paths.log_file.parent() {
+        fs::create_dir_all(parent).ok();
+    }
+    if let Ok(mut file) = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&paths.log_file)
+    {
+        writeln!(file, "{line}").ok();
+    }
 }
 
 fn run_cli() -> Result<()> {
@@ -442,6 +469,8 @@ fn run_cli() -> Result<()> {
         Commands::Login(args) => command_login(args),
         Commands::ShowKey(args) => command_show_key(args),
         Commands::SelfTest(args) => command_self_test(args),
+        Commands::ProbeGeneration(args) => command_probe_generation(args),
+        Commands::ProbeDroid => command_probe_droid(),
         Commands::FactoryConfig(args) => command_factory_config(args),
         Commands::Doctor(args) => command_doctor(args),
         Commands::GuiSnapshot => gui_api::print_snapshot_json(),
@@ -449,6 +478,9 @@ fn run_cli() -> Result<()> {
         Commands::GuiStart => gui_api::print_command_result_json(&["start"]),
         Commands::GuiStop => gui_api::print_command_result_json(&["stop"]),
         Commands::GuiDoctor => gui_api::print_command_result_json(&["doctor"]),
+        Commands::GuiLogin => gui_api::print_login_json(),
+        Commands::GuiProbeGeneration => gui_api::print_command_result_json(&["probe-generation"]),
+        Commands::GuiProbeDroid => gui_api::print_factory_droid_smoke_json(),
         Commands::GuiSyncFactory => gui_api::print_command_result_json(&["sync-factory"]),
         Commands::GuiSetDroidModel(args) => {
             gui_api::print_droid_model_update_json(&args.path, &args.model)
@@ -504,7 +536,7 @@ fn build_control_launcher_command(workspace: &Path, mode: ControlModeArg) -> Res
             .arg("/C")
             .arg(launcher)
             .arg(mode);
-        return Ok(command);
+        Ok(command)
     }
 
     #[cfg(not(windows))]
@@ -674,37 +706,15 @@ fn command_setup(args: SetupArgs) -> Result<()> {
     };
     let model_ids = resolve_model_ids(&args.models);
     let factory_path = resolve_factory_config_path(args.factory_config.as_ref())?;
-    let (added, updated, backup) = merge_factory_config(
+    let factory_settings_path = resolve_factory_settings_path(None)?;
+    let result = sync_factory_files(
         &factory_path,
+        &factory_settings_path,
         base_url.trim_end_matches('/'),
         &api_key,
         &model_ids,
     )?;
-    println!("Legacy config updated: {}", factory_path.display());
-    println!("Legacy custom models added: {added}, updated: {updated}");
-    if let Some(backup_path) = backup {
-        println!("Legacy config backup saved: {}", backup_path.display());
-    }
-
-    let factory_settings_path = resolve_factory_settings_path(None)?;
-    let (settings_added, settings_updated, settings_backup, defaults_updated) =
-        merge_factory_settings(
-            &factory_settings_path,
-            base_url.trim_end_matches('/'),
-            &api_key,
-            &model_ids,
-        )?;
-    println!(
-        "Factory settings updated: {}",
-        factory_settings_path.display()
-    );
-    println!("Factory custom models added: {settings_added}, updated: {settings_updated}");
-    if defaults_updated {
-        println!("Factory session and mission defaults now point to GPT-5.4 (XHigh).");
-    }
-    if let Some(backup_path) = settings_backup {
-        println!("Factory settings backup saved: {}", backup_path.display());
-    }
+    print_factory_sync_result(&factory_path, &factory_settings_path, &result);
 
     println!("Step 5/5: Complete.");
     println!("Ready to use.");
@@ -729,38 +739,47 @@ fn command_sync_factory(args: SyncFactoryArgs) -> Result<()> {
     let factory_path = resolve_factory_config_path(args.factory_config.as_ref())?;
     let factory_settings_path = resolve_factory_settings_path(args.factory_settings.as_ref())?;
 
-    let (added, updated, backup) = merge_factory_config(
+    let result = sync_factory_files(
         &factory_path,
+        &factory_settings_path,
         base_url.trim_end_matches('/'),
         &api_key,
         &model_ids,
     )?;
+    print_factory_sync_result(&factory_path, &factory_settings_path, &result);
+
+    Ok(())
+}
+
+fn print_factory_sync_result(
+    factory_path: &Path,
+    factory_settings_path: &Path,
+    result: &FactorySyncResult,
+) {
     println!("Legacy config updated: {}", factory_path.display());
-    println!("Legacy custom models added: {added}, updated: {updated}");
-    if let Some(backup_path) = backup {
+    println!(
+        "Legacy custom models added: {}, updated: {}",
+        result.legacy_added, result.legacy_updated
+    );
+    if let Some(backup_path) = &result.legacy_backup {
         println!("Legacy config backup saved: {}", backup_path.display());
     }
-
-    let (settings_added, settings_updated, settings_backup, defaults_updated) =
-        merge_factory_settings(
-            &factory_settings_path,
-            base_url.trim_end_matches('/'),
-            &api_key,
-            &model_ids,
-        )?;
     println!(
         "Factory settings updated: {}",
         factory_settings_path.display()
     );
-    println!("Factory custom models added: {settings_added}, updated: {settings_updated}");
-    if defaults_updated {
-        println!("Factory session and mission defaults now point to GPT-5.4 (XHigh).");
+    println!(
+        "Factory custom models added: {}, updated: {}",
+        result.settings_added, result.settings_updated
+    );
+    if result.defaults_updated {
+        println!(
+            "Factory session and mission defaults now point to GPT-5.5 with Extra High reasoning."
+        );
     }
-    if let Some(backup_path) = settings_backup {
+    if let Some(backup_path) = &result.settings_backup {
         println!("Factory settings backup saved: {}", backup_path.display());
     }
-
-    Ok(())
 }
 
 fn command_start(args: StartArgs) -> Result<()> {
@@ -786,6 +805,7 @@ fn command_start(args: StartArgs) -> Result<()> {
 
     let api_key = resolve_proxy_api_key(&paths.api_key_file, &args.api_key)?;
     let run_args = args.to_run_args(api_key.clone());
+    ensure_factory_runtime_config(&run_args)?;
 
     let background_executable = resolve_background_executable(&paths)?;
     let mut command = Command::new(background_executable);
@@ -830,8 +850,8 @@ fn command_start(args: StartArgs) -> Result<()> {
     let timeout = args.timeout.max(0.1);
     let deadline = Instant::now() + Duration::from_secs_f64(timeout);
     while Instant::now() < deadline {
-        let pid = read_pid(&paths.pid_file)
-            .or_else(|| child.as_ref().map(|process| process.id() as i32));
+        let pid =
+            read_pid(&paths.pid_file).or_else(|| child.as_ref().map(|process| process.id() as i32));
         let http_ready = is_http_ready(&args.host, args.port, Duration::from_millis(500));
         let port_ready = is_port_open(&args.host, args.port, Duration::from_millis(500));
         if http_ready || (port_ready && pid.map(pid_running).unwrap_or(false)) {
@@ -856,7 +876,8 @@ fn command_start(args: StartArgs) -> Result<()> {
         thread::sleep(Duration::from_millis(200));
     }
 
-    let pid = read_pid(&paths.pid_file).or_else(|| child.as_ref().map(|process| process.id() as i32));
+    let pid =
+        read_pid(&paths.pid_file).or_else(|| child.as_ref().map(|process| process.id() as i32));
     let port_ready = is_port_open(&args.host, args.port, Duration::from_millis(500));
     if port_ready && pid.map(pid_running).unwrap_or(false) {
         let pid = pid.unwrap_or_default();
@@ -882,6 +903,29 @@ fn command_start(args: StartArgs) -> Result<()> {
     Err(anyhow!("startup failed"))
 }
 
+fn ensure_factory_runtime_config(run_args: &RunArgs) -> Result<()> {
+    let model_ids = resolve_model_ids(&run_args.models);
+    let base_url = format!("http://{}:{}", run_args.host, run_args.port);
+    let factory_paths = paths::build_factory_paths()?;
+
+    if factory_settings_needs_sync(
+        &factory_paths.settings_path,
+        &base_url,
+        &run_args.api_key,
+        &model_ids,
+    )? {
+        sync_factory_files(
+            &factory_paths.config_path,
+            &factory_paths.settings_path,
+            &base_url,
+            &run_args.api_key,
+            &model_ids,
+        )?;
+    }
+
+    Ok(())
+}
+
 fn resolve_background_executable(paths: &AppPaths) -> Result<PathBuf> {
     let current_exe = std::env::current_exe().context("failed to resolve executable path")?;
 
@@ -896,7 +940,7 @@ fn resolve_background_executable(paths: &AppPaths) -> Result<PathBuf> {
                 )
             })?;
         }
-        return Ok(runtime_executable);
+        Ok(runtime_executable)
     }
 
     #[cfg(not(windows))]
@@ -907,26 +951,158 @@ fn resolve_background_executable(paths: &AppPaths) -> Result<PathBuf> {
 }
 
 #[cfg(windows)]
-fn spawn_background_gateway(mut command: Command, log_file: &Path) -> Result<Option<Child>> {
-    let log_handle = fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(log_file)
-        .with_context(|| format!("failed to open log file {}", log_file.display()))?;
-    let err_handle = log_handle
-        .try_clone()
-        .context("failed to clone log handle")?;
-
+fn spawn_background_gateway(mut command: Command, _log_file: &Path) -> Result<Option<Child>> {
     command
         .stdin(Stdio::null())
-        .stdout(Stdio::from(log_handle))
-        .stderr(Stdio::from(err_handle));
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
     configure_background_command(&mut command);
 
-    let child = command
-        .spawn()
-        .context("failed to start background process")?;
-    Ok(Some(child))
+    spawn_windows_detached(command)?;
+    Ok(None)
+}
+
+#[cfg(windows)]
+fn spawn_windows_detached(command: Command) -> Result<()> {
+    let program = command.get_program().to_owned();
+    let args = command
+        .get_args()
+        .map(|value| value.to_owned())
+        .collect::<Vec<_>>();
+    let command_line = windows_command_line(program.as_os_str(), &args);
+
+    let mut application_name = wide_null(program.as_os_str());
+    let mut command_line = command_line
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let mut startup_info = StartupInfoW {
+        cb: std::mem::size_of::<StartupInfoW>() as u32,
+        ..unsafe { std::mem::zeroed() }
+    };
+    let mut process_info = unsafe { std::mem::zeroed::<ProcessInformation>() };
+
+    let created = unsafe {
+        CreateProcessW(
+            application_name.as_mut_ptr(),
+            command_line.as_mut_ptr(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            0,
+            CREATE_NO_WINDOW | DETACHED_PROCESS,
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            &mut startup_info,
+            &mut process_info,
+        )
+    };
+
+    if created == 0 {
+        return Err(std::io::Error::last_os_error()).context("failed to start background process");
+    }
+
+    unsafe {
+        CloseHandle(process_info.h_thread);
+        CloseHandle(process_info.h_process);
+    }
+
+    Ok(())
+}
+
+#[cfg(windows)]
+fn windows_command_line(program: &OsStr, args: &[OsString]) -> String {
+    let mut parts = Vec::with_capacity(args.len() + 1);
+    parts.push(windows_quote_arg(program));
+    parts.extend(args.iter().map(|arg| windows_quote_arg(arg.as_os_str())));
+    parts.join(" ")
+}
+
+#[cfg(windows)]
+fn windows_quote_arg(value: &OsStr) -> String {
+    let raw = value.to_string_lossy();
+    if raw.is_empty() {
+        return "\"\"".to_string();
+    }
+    if !raw.chars().any(|ch| matches!(ch, ' ' | '\t' | '"')) {
+        return raw.into_owned();
+    }
+
+    let mut quoted = String::from("\"");
+    let mut backslashes = 0;
+    for ch in raw.chars() {
+        match ch {
+            '\\' => backslashes += 1,
+            '"' => {
+                quoted.push_str(&"\\".repeat(backslashes * 2 + 1));
+                quoted.push('"');
+                backslashes = 0;
+            }
+            _ => {
+                quoted.push_str(&"\\".repeat(backslashes));
+                backslashes = 0;
+                quoted.push(ch);
+            }
+        }
+    }
+    quoted.push_str(&"\\".repeat(backslashes * 2));
+    quoted.push('"');
+    quoted
+}
+
+#[cfg(windows)]
+fn wide_null(value: &OsStr) -> Vec<u16> {
+    value.encode_wide().chain(std::iter::once(0)).collect()
+}
+
+#[cfg(windows)]
+#[repr(C)]
+struct StartupInfoW {
+    cb: u32,
+    lp_reserved: *mut u16,
+    lp_desktop: *mut u16,
+    lp_title: *mut u16,
+    dw_x: u32,
+    dw_y: u32,
+    dw_x_size: u32,
+    dw_y_size: u32,
+    dw_x_count_chars: u32,
+    dw_y_count_chars: u32,
+    dw_fill_attribute: u32,
+    dw_flags: u32,
+    w_show_window: u16,
+    cb_reserved2: u16,
+    lp_reserved2: *mut u8,
+    h_std_input: *mut std::ffi::c_void,
+    h_std_output: *mut std::ffi::c_void,
+    h_std_error: *mut std::ffi::c_void,
+}
+
+#[cfg(windows)]
+#[repr(C)]
+struct ProcessInformation {
+    h_process: *mut std::ffi::c_void,
+    h_thread: *mut std::ffi::c_void,
+    dw_process_id: u32,
+    dw_thread_id: u32,
+}
+
+#[cfg(windows)]
+#[link(name = "kernel32")]
+extern "system" {
+    fn CreateProcessW(
+        lp_application_name: *const u16,
+        lp_command_line: *mut u16,
+        lp_process_attributes: *mut std::ffi::c_void,
+        lp_thread_attributes: *mut std::ffi::c_void,
+        b_inherit_handles: i32,
+        dw_creation_flags: u32,
+        lp_environment: *mut std::ffi::c_void,
+        lp_current_directory: *const u16,
+        lp_startup_info: *mut StartupInfoW,
+        lp_process_information: *mut ProcessInformation,
+    ) -> i32;
+
+    fn CloseHandle(h_object: *mut std::ffi::c_void) -> i32;
 }
 
 #[cfg(unix)]
@@ -1236,6 +1412,39 @@ fn command_self_test(args: SelfTestArgs) -> Result<()> {
     Ok(())
 }
 
+fn command_probe_generation(args: ProbeGenerationArgs) -> Result<()> {
+    let paths = build_paths()?;
+    paths.ensure_runtime_dirs()?;
+
+    if !is_port_open(&args.host, args.port, Duration::from_millis(400)) {
+        return Err(anyhow!(
+            "proxy is not reachable on {}:{} (run `opengateway start` first)",
+            args.host,
+            args.port
+        ));
+    }
+
+    let api_key = resolve_proxy_api_key(&paths.api_key_file, &args.api_key)?;
+    let factory_settings_path = resolve_factory_settings_path(None)?;
+    let model = generation_probe::resolve_probe_model(&args.model, &factory_settings_path)?;
+    let timeout = Duration::from_secs_f64(args.timeout.max(0.1));
+    let output = generation_probe::run_probe(generation_probe::ProbeConfig {
+        host: &args.host,
+        port: args.port,
+        api_key: &api_key,
+        model: &model,
+        timeout,
+    })?;
+
+    println!("{output}");
+    Ok(())
+}
+
+fn command_probe_droid() -> Result<()> {
+    println!("{}", gui_api::run_factory_droid_smoke_text()?);
+    Ok(())
+}
+
 fn command_factory_config(args: FactoryConfigArgs) -> Result<()> {
     let paths = build_paths()?;
     paths.ensure_runtime_dirs()?;
@@ -1427,462 +1636,6 @@ remote-management:\n\
     )
 }
 
-fn resolve_model_ids(explicit_models: &str) -> Vec<String> {
-    let explicit_models = explicit_models.trim();
-    if !explicit_models.is_empty() {
-        return parse_model_list(explicit_models);
-    }
-
-    let env_models = std::env::var("OPENGATEWAY_MODELS").unwrap_or_default();
-    if !env_models.trim().is_empty() {
-        return parse_model_list(&env_models);
-    }
-
-    DEFAULT_OPENAI_MODEL_CATALOG
-        .iter()
-        .map(|(model, _)| (*model).to_string())
-        .collect()
-}
-
-fn parse_model_list(raw: &str) -> Vec<String> {
-    let mut models = Vec::new();
-    let mut seen = HashSet::new();
-
-    for entry in raw.split(',') {
-        let model = entry.trim();
-        if model.is_empty() {
-            continue;
-        }
-        if seen.insert(model.to_string()) {
-            models.push(model.to_string());
-        }
-    }
-
-    if models.is_empty() {
-        DEFAULT_OPENAI_MODEL_CATALOG
-            .iter()
-            .map(|(model, _)| (*model).to_string())
-            .collect()
-    } else {
-        models
-    }
-}
-
-fn model_display_name(model_id: &str) -> String {
-    DEFAULT_OPENAI_MODEL_CATALOG
-        .iter()
-        .find(|(candidate, _)| *candidate == model_id)
-        .map(|(_, display_name)| (*display_name).to_string())
-        .unwrap_or_else(|| model_id.to_string())
-}
-
-fn build_factory_config(base_url: &str, api_key: &str, model_ids: &[String]) -> Value {
-    let models = model_ids
-        .iter()
-        .map(|model_id| {
-            json!({
-              "model_display_name": model_display_name(model_id),
-              "model": model_id,
-              "base_url": format!("{base_url}/v1"),
-              "api_key": api_key,
-              "provider": "openai"
-            })
-        })
-        .collect::<Vec<_>>();
-
-    json!({ "custom_models": models })
-}
-
-fn merge_factory_config(
-    output_path: &Path,
-    base_url: &str,
-    api_key: &str,
-    model_ids: &[String],
-) -> Result<(usize, usize, Option<PathBuf>)> {
-    if let Some(parent) = output_path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create {}", parent.display()))?;
-    }
-
-    let incoming_models = build_factory_config(base_url, api_key, model_ids)
-        .get("custom_models")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-
-    let mut existing = json!({});
-    let mut backup: Option<PathBuf> = None;
-    if output_path.exists() {
-        let original_name = output_path
-            .file_name()
-            .map(|value| value.to_string_lossy().to_string())
-            .unwrap_or_else(|| "config.json".to_string());
-        let backup_path =
-            output_path.with_file_name(format!("{original_name}.bak-{}", epoch_seconds()));
-        fs::copy(output_path, &backup_path).with_context(|| {
-            format!(
-                "failed to create backup {} from {}",
-                backup_path.display(),
-                output_path.display()
-            )
-        })?;
-        backup = Some(backup_path);
-
-        existing = fs::read_to_string(output_path)
-            .ok()
-            .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
-            .unwrap_or_else(|| json!({}));
-    }
-
-    if !existing.is_object() {
-        existing = json!({});
-    }
-
-    let object = existing
-        .as_object_mut()
-        .ok_or_else(|| anyhow!("internal error: expected JSON object"))?;
-
-    let current_models = object
-        .entry("custom_models")
-        .or_insert_with(|| Value::Array(Vec::new()));
-    if !current_models.is_array() {
-        *current_models = Value::Array(Vec::new());
-    }
-    let current_models = current_models
-        .as_array_mut()
-        .ok_or_else(|| anyhow!("internal error: custom_models should be array"))?;
-
-    let mut index_by_model: HashMap<String, usize> = HashMap::new();
-    for (index, model) in current_models.iter().enumerate() {
-        if let Some(name) = model.get("model").and_then(Value::as_str) {
-            index_by_model.insert(name.to_string(), index);
-        }
-    }
-
-    let mut added = 0;
-    let mut updated = 0;
-    for model in incoming_models {
-        let Some(model_name) = model.get("model").and_then(Value::as_str) else {
-            continue;
-        };
-        if let Some(index) = index_by_model.get(model_name).copied() {
-            current_models[index] = model;
-            updated += 1;
-        } else {
-            index_by_model.insert(model_name.to_string(), current_models.len());
-            current_models.push(model);
-            added += 1;
-        }
-    }
-
-    let rendered =
-        serde_json::to_string_pretty(&existing).context("failed to encode merged config")?;
-    fs::write(output_path, format!("{rendered}\n"))
-        .with_context(|| format!("failed to write {}", output_path.display()))?;
-
-    Ok((added, updated, backup))
-}
-
-fn build_factory_settings_model(
-    model_id: &str,
-    base_url: &str,
-    api_key: &str,
-    index: usize,
-) -> Value {
-    let display_name = model_display_name(model_id);
-    json!({
-        "model": model_id,
-        "id": factory_custom_model_id(&display_name, index),
-        "index": index,
-        "baseUrl": format!("{base_url}/v1"),
-        "apiKey": api_key,
-        "displayName": display_name,
-        "noImageSupport": false,
-        "provider": "openai"
-    })
-}
-
-fn factory_custom_model_id(display_name: &str, index: usize) -> String {
-    format!("custom:{}-{index}", display_name.replace(' ', "-"))
-}
-
-fn merge_factory_settings(
-    output_path: &Path,
-    base_url: &str,
-    api_key: &str,
-    model_ids: &[String],
-) -> Result<(usize, usize, Option<PathBuf>, bool)> {
-    if let Some(parent) = output_path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create {}", parent.display()))?;
-    }
-
-    let (existing, backup) = read_json_with_backup(output_path)?;
-    let (merged, added, updated, defaults_updated) =
-        merge_factory_settings_document(existing, base_url, api_key, model_ids)?;
-
-    let rendered =
-        serde_json::to_string_pretty(&merged).context("failed to encode merged settings")?;
-    fs::write(output_path, format!("{rendered}\n"))
-        .with_context(|| format!("failed to write {}", output_path.display()))?;
-
-    Ok((added, updated, backup, defaults_updated))
-}
-
-fn merge_factory_settings_document(
-    mut existing: Value,
-    base_url: &str,
-    api_key: &str,
-    model_ids: &[String],
-) -> Result<(Value, usize, usize, bool)> {
-    if !existing.is_object() {
-        existing = json!({});
-    }
-
-    let object = existing
-        .as_object_mut()
-        .ok_or_else(|| anyhow!("internal error: expected settings JSON object"))?;
-
-    let managed_ids_before;
-    let preferred_model_id;
-    let added;
-    let updated;
-    {
-        let current_models = object
-            .entry("customModels")
-            .or_insert_with(|| Value::Array(Vec::new()));
-        if !current_models.is_array() {
-            *current_models = Value::Array(Vec::new());
-        }
-        let current_models = current_models
-            .as_array_mut()
-            .ok_or_else(|| anyhow!("internal error: customModels should be array"))?;
-
-        managed_ids_before = collect_managed_factory_model_ids(current_models, base_url, api_key);
-        let merge_result =
-            merge_factory_settings_models(current_models, base_url, api_key, model_ids);
-        added = merge_result.0;
-        updated = merge_result.1;
-        preferred_model_id = merge_result.2;
-    }
-
-    let defaults_updated = update_factory_settings_defaults(
-        object,
-        &managed_ids_before,
-        preferred_model_id.as_deref(),
-    );
-
-    Ok((existing, added, updated, defaults_updated))
-}
-
-fn collect_managed_factory_model_ids(
-    current_models: &[Value],
-    base_url: &str,
-    api_key: &str,
-) -> HashSet<String> {
-    let expected_base_url = format!("{base_url}/v1");
-
-    current_models
-        .iter()
-        .filter_map(Value::as_object)
-        .filter(|model| {
-            model.get("provider").and_then(Value::as_str) == Some("openai")
-                && model.get("baseUrl").and_then(Value::as_str) == Some(expected_base_url.as_str())
-                && model.get("apiKey").and_then(Value::as_str) == Some(api_key)
-        })
-        .filter_map(|model| model.get("id").and_then(Value::as_str))
-        .map(str::to_string)
-        .collect()
-}
-
-fn merge_factory_settings_models(
-    current_models: &mut Vec<Value>,
-    base_url: &str,
-    api_key: &str,
-    model_ids: &[String],
-) -> (usize, usize, Option<String>) {
-    let mut index_by_model: HashMap<String, usize> = HashMap::new();
-    for (index, model) in current_models.iter().enumerate() {
-        if let Some(name) = model.get("model").and_then(Value::as_str) {
-            index_by_model.insert(name.to_string(), index);
-        }
-    }
-
-    let mut added = 0;
-    let mut updated = 0;
-    let mut preferred_model_id = None;
-
-    for model_id in model_ids {
-        if let Some(index) = index_by_model.get(model_id).copied() {
-            let mut replacement = build_factory_settings_model(model_id, base_url, api_key, index);
-            if let (Some(existing), Some(replacement_object)) = (
-                current_models[index].as_object(),
-                replacement.as_object_mut(),
-            ) {
-                if let Some(existing_id) = existing.get("id").and_then(Value::as_str) {
-                    replacement_object
-                        .insert("id".to_string(), Value::String(existing_id.to_string()));
-                }
-                if let Some(existing_index) = existing.get("index").and_then(Value::as_u64) {
-                    replacement_object
-                        .insert("index".to_string(), Value::Number(existing_index.into()));
-                }
-            }
-            if model_id == FACTORY_PREFERRED_MODEL {
-                preferred_model_id = replacement
-                    .get("id")
-                    .and_then(Value::as_str)
-                    .map(str::to_string);
-            }
-            current_models[index] = replacement;
-            updated += 1;
-        } else {
-            let index = current_models.len();
-            let model = build_factory_settings_model(model_id, base_url, api_key, index);
-            if model_id == FACTORY_PREFERRED_MODEL {
-                preferred_model_id = model.get("id").and_then(Value::as_str).map(str::to_string);
-            }
-            index_by_model.insert(model_id.to_string(), index);
-            current_models.push(model);
-            added += 1;
-        }
-    }
-
-    (added, updated, preferred_model_id)
-}
-
-fn update_factory_settings_defaults(
-    settings: &mut serde_json::Map<String, Value>,
-    managed_ids_before: &HashSet<String>,
-    preferred_model_id: Option<&str>,
-) -> bool {
-    let Some(preferred_model_id) = preferred_model_id else {
-        return false;
-    };
-
-    let mut updated = false;
-
-    let session_defaults = ensure_object_entry(settings, "sessionDefaultSettings");
-    if should_update_factory_default_model(
-        session_defaults.get("model").and_then(Value::as_str),
-        managed_ids_before,
-        preferred_model_id,
-    ) {
-        session_defaults.insert(
-            "model".to_string(),
-            Value::String(preferred_model_id.to_string()),
-        );
-        updated = true;
-    }
-    if session_defaults
-        .get("model")
-        .and_then(Value::as_str)
-        .map(|value| value == preferred_model_id)
-        .unwrap_or(false)
-        && session_defaults
-            .get("reasoningEffort")
-            .and_then(Value::as_str)
-            != Some(FACTORY_PREFERRED_REASONING_EFFORT)
-    {
-        session_defaults.insert(
-            "reasoningEffort".to_string(),
-            Value::String(FACTORY_PREFERRED_REASONING_EFFORT.to_string()),
-        );
-        updated = true;
-    }
-
-    let mission_defaults = ensure_object_entry(settings, "missionModelSettings");
-    for (model_key, effort_key) in [
-        ("orchestratorModel", "orchestratorReasoningEffort"),
-        ("workerModel", "workerReasoningEffort"),
-        ("validationWorkerModel", "validationWorkerReasoningEffort"),
-    ] {
-        if should_update_factory_default_model(
-            mission_defaults.get(model_key).and_then(Value::as_str),
-            managed_ids_before,
-            preferred_model_id,
-        ) {
-            mission_defaults.insert(
-                model_key.to_string(),
-                Value::String(preferred_model_id.to_string()),
-            );
-            updated = true;
-        }
-
-        if mission_defaults
-            .get(model_key)
-            .and_then(Value::as_str)
-            .map(|value| value == preferred_model_id)
-            .unwrap_or(false)
-            && mission_defaults.get(effort_key).and_then(Value::as_str)
-                != Some(FACTORY_PREFERRED_REASONING_EFFORT)
-        {
-            mission_defaults.insert(
-                effort_key.to_string(),
-                Value::String(FACTORY_PREFERRED_REASONING_EFFORT.to_string()),
-            );
-            updated = true;
-        }
-    }
-
-    updated
-}
-
-fn should_update_factory_default_model(
-    current_model: Option<&str>,
-    managed_ids_before: &HashSet<String>,
-    preferred_model_id: &str,
-) -> bool {
-    match current_model {
-        None => true,
-        Some(value) if value == preferred_model_id => false,
-        Some(value) => managed_ids_before.contains(value),
-    }
-}
-
-fn ensure_object_entry<'a>(
-    object: &'a mut serde_json::Map<String, Value>,
-    key: &str,
-) -> &'a mut serde_json::Map<String, Value> {
-    let value = object
-        .entry(key.to_string())
-        .or_insert_with(|| Value::Object(serde_json::Map::new()));
-    if !value.is_object() {
-        *value = Value::Object(serde_json::Map::new());
-    }
-    value
-        .as_object_mut()
-        .expect("object entry should be an object after normalization")
-}
-
-fn read_json_with_backup(path: &Path) -> Result<(Value, Option<PathBuf>)> {
-    let mut existing = json!({});
-    let mut backup = None;
-
-    if path.exists() {
-        let original_name = path
-            .file_name()
-            .map(|value| value.to_string_lossy().to_string())
-            .unwrap_or_else(|| "config.json".to_string());
-        let backup_path = path.with_file_name(format!("{original_name}.bak-{}", epoch_seconds()));
-        fs::copy(path, &backup_path).with_context(|| {
-            format!(
-                "failed to create backup {} from {}",
-                backup_path.display(),
-                path.display()
-            )
-        })?;
-        backup = Some(backup_path);
-
-        existing = fs::read_to_string(path)
-            .ok()
-            .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
-            .unwrap_or_else(|| json!({}));
-    }
-
-    Ok((existing, backup))
-}
-
 fn expand_user_path(path: &Path) -> PathBuf {
     let raw = path.to_string_lossy();
     if raw == "~" {
@@ -1914,7 +1667,7 @@ fn resolve_proxy_api_key(api_key_path: &Path, explicit: &str) -> Result<String> 
         }
     }
 
-    let generated = generate_secret(32);
+    let generated = generate_secret(32)?;
     write_secret_file(api_key_path, &generated)?;
     Ok(generated)
 }
@@ -1962,10 +1715,11 @@ fn write_secret_file(path: &Path, value: &str) -> Result<()> {
     Ok(())
 }
 
-fn generate_secret(byte_len: usize) -> String {
+fn generate_secret(byte_len: usize) -> Result<String> {
     let mut bytes = vec![0_u8; byte_len];
-    rand::thread_rng().fill(&mut bytes[..]);
-    URL_SAFE_NO_PAD.encode(bytes)
+    getrandom::getrandom(&mut bytes)
+        .map_err(|err| anyhow!("failed to generate local API key entropy: {err}"))?;
+    Ok(URL_SAFE_NO_PAD.encode(bytes))
 }
 
 fn read_pid(path: &Path) -> Option<i32> {
@@ -2016,25 +1770,25 @@ fn pid_running(pid: i32) -> bool {
             .stderr(Stdio::null())
             .output();
 
-        return output
+        output
             .ok()
             .filter(|result| result.status.success())
             .and_then(|result| String::from_utf8(result.stdout).ok())
             .map(|stdout| stdout.trim_start().starts_with('"'))
-            .unwrap_or(false);
+            .unwrap_or(false)
     }
 
     #[cfg(not(windows))]
     {
-    Command::new("kill")
-        .arg("-0")
-        .arg(pid.to_string())
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|status| status.success())
-        .unwrap_or(false)
+        Command::new("kill")
+            .arg("-0")
+            .arg(pid.to_string())
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
     }
 }
 
@@ -2044,7 +1798,7 @@ fn send_signal(pid: i32, signal: &str) -> Result<()> {
         let mut command = windows_system_command("taskkill");
         hidden_command(&mut command);
         command.arg("/PID").arg(pid.to_string()).arg("/T");
-        if signal == "-KILL" {
+        if windows_taskkill_requires_force(signal) {
             command.arg("/F");
         }
 
@@ -2055,29 +1809,46 @@ fn send_signal(pid: i32, signal: &str) -> Result<()> {
             .status()
             .with_context(|| format!("failed to execute taskkill for pid {pid}"))?;
 
-        return if status.success() {
+        if status.success() {
             Ok(())
         } else {
             Err(anyhow!("taskkill {} {} failed", signal, pid))
-        };
+        }
     }
 
     #[cfg(not(windows))]
     {
-    let status = Command::new("kill")
-        .arg(signal)
-        .arg(pid.to_string())
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .with_context(|| format!("failed to execute kill for pid {pid}"))?;
+        let status = Command::new("kill")
+            .arg(signal)
+            .arg(pid.to_string())
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .with_context(|| format!("failed to execute kill for pid {pid}"))?;
 
-    if status.success() {
-        Ok(())
-    } else {
-        Err(anyhow!("kill {} {} failed", signal, pid))
+        if status.success() {
+            Ok(())
+        } else {
+            Err(anyhow!("kill {} {} failed", signal, pid))
+        }
     }
+}
+
+#[cfg(windows)]
+fn windows_taskkill_requires_force(signal: &str) -> bool {
+    matches!(signal, "-TERM" | "-KILL")
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::windows_taskkill_requires_force;
+
+    #[test]
+    fn windows_taskkill_forces_managed_backend_stop() {
+        assert!(windows_taskkill_requires_force("-TERM"));
+        assert!(windows_taskkill_requires_force("-KILL"));
+        assert!(!windows_taskkill_requires_force("-0"));
     }
 }
 
@@ -2170,13 +1941,6 @@ fn is_http_ready(host: &str, port: u16, timeout: Duration) -> bool {
     status_line.starts_with("HTTP/1.1 200") || status_line.starts_with("HTTP/1.0 200")
 }
 
-fn epoch_seconds() -> i64 {
-    let duration = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default();
-    duration.as_secs() as i64
-}
-
 #[cfg(windows)]
 fn configure_background_command(command: &mut Command) {
     command.creation_flags(CREATE_NO_WINDOW | DETACHED_PROCESS);
@@ -2212,94 +1976,4 @@ fn windows_system_executable(executable: &str) -> Option<OsString> {
             .join(executable)
             .into_os_string(),
     )
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn builds_factory_custom_model_ids_from_display_names() {
-        assert_eq!(
-            factory_custom_model_id("GPT-5.4 (XHigh)", 24),
-            "custom:GPT-5.4-(XHigh)-24"
-        );
-    }
-
-    #[test]
-    fn merges_factory_settings_and_upgrades_managed_defaults() {
-        let existing = json!({
-            "customModels": [
-                {
-                    "model": "gpt-5.3-codex(xhigh)",
-                    "id": "custom:GPT-5.3-Codex-(XHigh)-3",
-                    "index": 3,
-                    "baseUrl": "http://127.0.0.1:42069/v1",
-                    "apiKey": "secret",
-                    "displayName": "GPT-5.3 Codex (XHigh)",
-                    "noImageSupport": false,
-                    "provider": "openai"
-                }
-            ],
-            "sessionDefaultSettings": {
-                "model": "custom:GPT-5.3-Codex-(XHigh)-3",
-                "reasoningEffort": "xhigh"
-            },
-            "missionModelSettings": {
-                "orchestratorModel": "custom:GPT-5.3-Codex-(XHigh)-3",
-                "orchestratorReasoningEffort": "none",
-                "workerModel": "custom:GPT-5.3-Codex-(XHigh)-3",
-                "workerReasoningEffort": "none",
-                "validationWorkerModel": "custom:GPT-5.3-Codex-(XHigh)-3",
-                "validationWorkerReasoningEffort": "none"
-            }
-        });
-
-        let model_ids = vec![
-            "gpt-5.3-codex(xhigh)".to_string(),
-            "gpt-5.4(xhigh)".to_string(),
-        ];
-
-        let (merged, added, updated, defaults_updated) = merge_factory_settings_document(
-            existing,
-            "http://127.0.0.1:42069",
-            "secret",
-            &model_ids,
-        )
-        .expect("settings merge should succeed");
-
-        assert_eq!(added, 1);
-        assert_eq!(updated, 1);
-        assert!(defaults_updated);
-
-        let custom_models = merged
-            .get("customModels")
-            .and_then(Value::as_array)
-            .expect("customModels should be an array");
-        let preferred_model = custom_models
-            .iter()
-            .find(|entry| entry.get("model").and_then(Value::as_str) == Some("gpt-5.4(xhigh)"))
-            .expect("gpt-5.4(xhigh) should be present");
-        let preferred_model_id = preferred_model
-            .get("id")
-            .and_then(Value::as_str)
-            .expect("preferred custom model should have an id");
-
-        assert_eq!(
-            merged
-                .get("sessionDefaultSettings")
-                .and_then(Value::as_object)
-                .and_then(|settings| settings.get("model"))
-                .and_then(Value::as_str),
-            Some(preferred_model_id)
-        );
-        assert_eq!(
-            merged
-                .get("missionModelSettings")
-                .and_then(Value::as_object)
-                .and_then(|settings| settings.get("workerReasoningEffort"))
-                .and_then(Value::as_str),
-            Some("xhigh")
-        );
-    }
 }

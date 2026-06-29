@@ -875,6 +875,22 @@ pre {
   overflow-wrap: anywhere;
 }
 
+.status-board__issue {
+  color: var(--warning);
+}
+
+.status-board__action {
+  justify-self: start;
+}
+
+.status-board__note {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.82rem;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
 .mini-facts {
   margin: 0;
   display: grid;

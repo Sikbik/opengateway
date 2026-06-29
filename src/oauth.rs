@@ -1,7 +1,6 @@
 use anyhow::{anyhow, bail, Context, Result};
 use base64::engine::general_purpose::{URL_SAFE, URL_SAFE_NO_PAD};
 use base64::Engine as _;
-use rand::Rng;
 use reqwest::blocking::Client;
 use serde::Deserialize;
 use serde_json::Value;
@@ -9,7 +8,7 @@ use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::process::Command;
+use std::process::{Command, ExitStatus};
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -82,9 +81,9 @@ pub fn refresh_access_token(
 }
 
 fn login_browser(client: &Client, no_browser: bool, verbose: bool) -> Result<OAuthLoginResult> {
-    let pkce_verifier = generate_pkce_verifier(43);
+    let pkce_verifier = generate_pkce_verifier(43)?;
     let pkce_challenge = generate_pkce_challenge(&pkce_verifier);
-    let state = generate_state();
+    let state = generate_state()?;
 
     let (listener, port) = bind_callback_listener()?;
     let redirect_uri = format!("http://localhost:{port}/auth/callback");
@@ -392,15 +391,15 @@ fn parse_poll_interval(raw: Option<&str>) -> Duration {
     Duration::from_secs(seconds) + OAUTH_POLLING_SAFETY_MARGIN
 }
 
-fn generate_pkce_verifier(length: usize) -> String {
+fn generate_pkce_verifier(length: usize) -> Result<String> {
     let chars = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~";
-    let mut rng = rand::thread_rng();
-    (0..length)
-        .map(|_| {
-            let idx = rng.gen_range(0..chars.len());
-            chars[idx] as char
-        })
-        .collect()
+    let mut bytes = vec![0_u8; length];
+    getrandom::getrandom(&mut bytes)
+        .map_err(|err| anyhow!("failed to generate PKCE verifier entropy: {err}"))?;
+    Ok(bytes
+        .into_iter()
+        .map(|byte| chars[byte as usize % chars.len()] as char)
+        .collect())
 }
 
 fn generate_pkce_challenge(verifier: &str) -> String {
@@ -408,10 +407,11 @@ fn generate_pkce_challenge(verifier: &str) -> String {
     URL_SAFE_NO_PAD.encode(digest)
 }
 
-fn generate_state() -> String {
+fn generate_state() -> Result<String> {
     let mut bytes = [0_u8; 32];
-    rand::thread_rng().fill(&mut bytes);
-    URL_SAFE_NO_PAD.encode(bytes)
+    getrandom::getrandom(&mut bytes)
+        .map_err(|err| anyhow!("failed to generate OAuth state entropy: {err}"))?;
+    Ok(URL_SAFE_NO_PAD.encode(bytes))
 }
 
 fn open_browser(url: &str) -> Result<()> {
@@ -424,26 +424,33 @@ fn open_browser(url: &str) -> Result<()> {
             } else {
                 process.arg(url);
             }
-            if process.status().is_ok() {
+            if browser_launcher_succeeded(process.status()) {
                 return Ok(());
             }
         }
     }
 
-    if cfg!(target_os = "macos") && Command::new("open").arg(url).status().is_ok() {
+    if cfg!(target_os = "macos")
+        && browser_launcher_succeeded(Command::new("open").arg(url).status())
+    {
         return Ok(());
     }
 
     if cfg!(target_os = "windows")
-        && Command::new("cmd")
-            .args(["/C", "start", "", url])
-            .status()
-            .is_ok()
+        && browser_launcher_succeeded(
+            Command::new("rundll32")
+                .args(["url.dll,FileProtocolHandler", url])
+                .status(),
+        )
     {
         return Ok(());
     }
 
     bail!("no supported browser launcher found")
+}
+
+fn browser_launcher_succeeded(status: std::io::Result<ExitStatus>) -> bool {
+    status.map(|value| value.success()).unwrap_or(false)
 }
 
 fn extract_account_id_from_jwt(token: &str) -> Option<String> {
@@ -546,5 +553,18 @@ mod tests {
     fn parse_poll_interval_has_safety_margin() {
         assert_eq!(parse_poll_interval(Some("5")), Duration::from_secs(8));
         assert_eq!(parse_poll_interval(Some("0")), Duration::from_secs(4));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn browser_launcher_requires_successful_exit_status() {
+        use std::os::unix::process::ExitStatusExt;
+
+        assert!(browser_launcher_succeeded(Ok(
+            std::process::ExitStatus::from_raw(0)
+        )));
+        assert!(!browser_launcher_succeeded(Ok(
+            std::process::ExitStatus::from_raw(1)
+        )));
     }
 }

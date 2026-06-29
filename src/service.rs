@@ -14,6 +14,9 @@ const MAX_HEADER_BYTES: usize = 64 * 1024;
 const REFRESH_SKEW_MS: i64 = 5 * 60 * 1000;
 const UPSTREAM_RESPONSES_ENDPOINT: &str = "https://chatgpt.com/backend-api/codex/responses";
 const DEFAULT_INSTRUCTIONS: &str = "You are a helpful assistant.";
+const GPT_5_5_MODEL: &str = "gpt-5.5";
+const GPT_5_5_FAST_MODEL: &str = "gpt-5.5-fast";
+const PRIORITY_SERVICE_TIER: &str = "priority";
 const RETRY_AFTER_SECONDS: u64 = 1;
 const RATE_LIMITER_ENTRY_TTL: Duration = Duration::from_secs(15 * 60);
 const RATE_LIMITER_CLEANUP_INTERVAL: Duration = Duration::from_secs(60);
@@ -783,6 +786,7 @@ fn is_sse_payload(body: &[u8]) -> bool {
 fn extract_response_object_from_sse(body: &[u8]) -> Option<Vec<u8>> {
     let text = std::str::from_utf8(body).ok()?;
     let mut response_object: Option<Value> = None;
+    let mut output_text = String::new();
 
     for raw_line in text.lines() {
         let line = raw_line.trim();
@@ -806,23 +810,86 @@ fn extract_response_object_from_sse(body: &[u8]) -> Option<Vec<u8>> {
         let response = event_payload.get("response").cloned();
 
         match event_type {
+            "response.output_text.delta" => {
+                if let Some(delta) = event_payload.get("delta").and_then(Value::as_str) {
+                    output_text.push_str(delta);
+                }
+            }
+            "response.output_text.done" => {
+                if output_text.is_empty() {
+                    if let Some(text) = event_payload.get("text").and_then(Value::as_str) {
+                        output_text.push_str(text);
+                    }
+                }
+            }
             "response.created" => {
                 if response_object.is_none() {
                     response_object = response;
                 }
             }
-            "response.completed" | "response.failed" | "response.incomplete" => {
-                if response.is_some() {
-                    response_object = response;
-                }
+            "response.completed" | "response.failed" | "response.incomplete"
+                if response.is_some() =>
+            {
+                response_object = response;
             }
             _ => {}
         }
     }
 
-    response_object
-        .filter(Value::is_object)
-        .and_then(|response| serde_json::to_vec(&response).ok())
+    let mut response = response_object.filter(Value::is_object)?;
+    if !output_text.is_empty() {
+        ensure_response_output_text(&mut response, output_text);
+    }
+
+    serde_json::to_vec(&response).ok()
+}
+
+fn ensure_response_output_text(response: &mut Value, text: String) {
+    if response_has_output_text(response) {
+        return;
+    }
+
+    let Some(object) = response.as_object_mut() else {
+        return;
+    };
+
+    object.insert(
+        "output".to_string(),
+        json!([{
+            "type": "message",
+            "role": "assistant",
+            "status": "completed",
+            "content": [{
+                "type": "output_text",
+                "text": text,
+                "annotations": []
+            }]
+        }]),
+    );
+}
+
+fn response_has_output_text(response: &Value) -> bool {
+    response
+        .get("output")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_object)
+        .any(|item| {
+            item.get("content")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_object)
+                .any(|part| {
+                    part.get("type").and_then(Value::as_str) == Some("output_text")
+                        && part
+                            .get("text")
+                            .and_then(Value::as_str)
+                            .map(|text| !text.is_empty())
+                            .unwrap_or(false)
+                })
+        })
 }
 
 fn strip_unsupported_fields(payload_object: &mut serde_json::Map<String, Value>) {
@@ -836,6 +903,7 @@ fn strip_unsupported_fields(payload_object: &mut serde_json::Map<String, Value>)
                 | "tool_choice"
                 | "reasoning"
                 | "parallel_tool_calls"
+                | "service_tier"
                 | "text"
                 | "include"
                 | "stream"
@@ -922,22 +990,30 @@ fn normalize_model_alias_and_reasoning(payload_object: &mut serde_json::Map<Stri
         return;
     };
 
-    let Some((canonical_model, effort)) = parse_model_effort_alias(model_id) else {
+    let Some((canonical_model, effort, service_tier)) = normalize_requested_model(model_id) else {
         return;
     };
 
     payload_object.insert("model".to_string(), Value::String(canonical_model));
+    if let Some(service_tier) = service_tier {
+        payload_object.insert(
+            "service_tier".to_string(),
+            Value::String(service_tier.to_string()),
+        );
+    }
 
-    match payload_object.get_mut("reasoning") {
-        Some(existing_reasoning) if existing_reasoning.is_object() => {
-            if let Some(reasoning) = existing_reasoning.as_object_mut() {
-                reasoning.insert("effort".to_string(), Value::String(effort));
+    if let Some(effort) = effort {
+        match payload_object.get_mut("reasoning") {
+            Some(existing_reasoning) if existing_reasoning.is_object() => {
+                if let Some(reasoning) = existing_reasoning.as_object_mut() {
+                    reasoning.insert("effort".to_string(), Value::String(effort));
+                }
             }
-        }
-        _ => {
-            let mut reasoning = serde_json::Map::new();
-            reasoning.insert("effort".to_string(), Value::String(effort));
-            payload_object.insert("reasoning".to_string(), Value::Object(reasoning));
+            _ => {
+                let mut reasoning = serde_json::Map::new();
+                reasoning.insert("effort".to_string(), Value::String(effort));
+                payload_object.insert("reasoning".to_string(), Value::Object(reasoning));
+            }
         }
     }
 }
@@ -1294,6 +1370,44 @@ fn parse_model_effort_alias(model_id: &str) -> Option<(String, String)> {
     None
 }
 
+fn normalize_requested_model(
+    model_id: &str,
+) -> Option<(String, Option<String>, Option<&'static str>)> {
+    let requested_model =
+        parse_factory_custom_model_id(model_id).unwrap_or_else(|| model_id.to_string());
+
+    if let Some((model, effort)) = parse_model_effort_alias(&requested_model) {
+        let (model, service_tier) = normalize_fast_model(&model)
+            .map(|(model, service_tier)| (model.to_string(), Some(service_tier)))
+            .unwrap_or((model, None));
+        return Some((model, Some(effort), service_tier));
+    }
+
+    if let Some((model, service_tier)) = normalize_fast_model(&requested_model) {
+        return Some((model.to_string(), None, Some(service_tier)));
+    }
+
+    parse_factory_custom_model_id(model_id).map(|model| (model, None, None))
+}
+
+fn normalize_fast_model(model_id: &str) -> Option<(&'static str, &'static str)> {
+    match model_id {
+        GPT_5_5_FAST_MODEL => Some((GPT_5_5_MODEL, PRIORITY_SERVICE_TIER)),
+        _ => None,
+    }
+}
+
+fn parse_factory_custom_model_id(model_id: &str) -> Option<String> {
+    let raw = model_id.strip_prefix("custom:")?;
+    let (display_name, index) = raw.rsplit_once('-')?;
+    if display_name.is_empty() || !index.chars().all(|character| character.is_ascii_digit()) {
+        return None;
+    }
+
+    let normalized = display_name.replace("-(", "(").to_ascii_lowercase();
+    (!normalized.is_empty()).then_some(normalized)
+}
+
 fn parse_parenthesized_effort_alias(model_id: &str) -> Option<(&str, &str)> {
     if !model_id.ends_with(')') {
         return None;
@@ -1492,6 +1606,61 @@ mod tests {
                 .and_then(|reasoning| reasoning.get("effort"))
                 .and_then(Value::as_str),
             Some("xhigh")
+        );
+    }
+
+    #[test]
+    fn normalizes_factory_custom_model_id_and_injects_reasoning() {
+        let body = serde_json::to_vec(&json!({"model":"custom:GPT-5.4-(XHigh)-4", "input": "hi"}))
+            .expect("body serialization should succeed");
+        let normalized = normalize_model_alias_in_request_body(body);
+        let payload: Value =
+            serde_json::from_slice(&normalized).expect("normalized payload must be valid json");
+
+        assert_eq!(
+            payload.get("model").and_then(Value::as_str),
+            Some("gpt-5.4")
+        );
+        assert_eq!(
+            payload
+                .get("reasoning")
+                .and_then(Value::as_object)
+                .and_then(|reasoning| reasoning.get("effort"))
+                .and_then(Value::as_str),
+            Some("xhigh")
+        );
+    }
+
+    #[test]
+    fn normalizes_factory_custom_model_id_without_reasoning_alias() {
+        let body = serde_json::to_vec(&json!({"model":"custom:GPT-5.4-0", "input": "hi"}))
+            .expect("body serialization should succeed");
+        let normalized = normalize_model_alias_in_request_body(body);
+        let payload: Value =
+            serde_json::from_slice(&normalized).expect("normalized payload must be valid json");
+
+        assert_eq!(
+            payload.get("model").and_then(Value::as_str),
+            Some("gpt-5.4")
+        );
+        assert!(payload.get("reasoning").is_none());
+    }
+
+    #[test]
+    fn normalizes_gpt_5_5_fast_to_priority_service_tier() {
+        let body = serde_json::to_vec(&json!({"model":"gpt-5.5-fast", "input": "hi"}))
+            .expect("body serialization should succeed");
+        let normalized = normalize_model_alias_in_request_body(body);
+        let payload: Value =
+            serde_json::from_slice(&normalized).expect("normalized payload must be valid json");
+
+        assert_eq!(
+            payload.get("model").and_then(Value::as_str),
+            Some("gpt-5.5")
+        );
+        assert_eq!(
+            payload.get("service_tier").and_then(Value::as_str),
+            Some("priority")
         );
     }
 
@@ -1848,6 +2017,27 @@ mod tests {
     }
 
     #[test]
+    fn strips_unsupported_token_limit_fields() {
+        let body = serde_json::to_vec(&json!({
+            "model": "gpt-5.4",
+            "input": "hello",
+            "max_output_tokens": 64,
+            "max_tokens": 32
+        }))
+        .expect("body serialization should succeed");
+
+        let normalized = normalize_model_alias_in_request_body(body);
+        let payload: Value =
+            serde_json::from_slice(&normalized).expect("normalized payload must be valid json");
+        let object = payload
+            .as_object()
+            .expect("normalized payload should remain an object");
+
+        assert!(!object.contains_key("max_output_tokens"));
+        assert!(!object.contains_key("max_tokens"));
+    }
+
+    #[test]
     fn detects_stream_preference_flag() {
         assert!(request_prefers_stream(br#"{"stream":true}"#));
         assert!(!request_prefers_stream(br#"{"stream":false}"#));
@@ -1887,5 +2077,23 @@ mod tests {
             payload.get("status").and_then(Value::as_str),
             Some("completed")
         );
+        assert_eq!(response_output_text(&payload).as_deref(), Some("Hello"));
+    }
+
+    fn response_output_text(response: &Value) -> Option<String> {
+        let text = response
+            .get("output")?
+            .as_array()?
+            .iter()
+            .filter_map(Value::as_object)
+            .flat_map(|item| {
+                item.get("content")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+            })
+            .filter_map(|part| part.get("text").and_then(Value::as_str))
+            .collect::<String>();
+        (!text.is_empty()).then_some(text)
     }
 }

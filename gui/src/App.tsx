@@ -124,6 +124,10 @@ function formatLogTimestamp(timestamp: number | null) {
   });
 }
 
+function readinessLabel(issue: string | null): string {
+  return issue ? "Needs setup" : "Ready";
+}
+
 function parseLogLine(line: string) {
   const match = line.match(/^\[(\d{13})\]\s+(.*)$/);
   if (!match) {
@@ -347,6 +351,10 @@ function App() {
   const [snapshot, setSnapshot] = useState<AppSnapshot | null>(null);
   const [logs, setLogs] = useState<string[]>([]);
   const [doctorOutput, setDoctorOutput] = useState("");
+  const [generationOutput, setGenerationOutput] = useState("");
+  const [droidSmokeOutput, setDroidSmokeOutput] = useState("");
+  const [authOutput, setAuthOutput] = useState("");
+  const [factorySyncOutput, setFactorySyncOutput] = useState("");
   const [activeTab, setActiveTab] = useState<TabKey>("dashboard");
   const [selectedModels, setSelectedModels] = useState<Record<string, string>>(
     {},
@@ -367,10 +375,17 @@ function App() {
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const mounted = useRef(true);
+  const refreshInFlight = useRef(false);
+  const refreshQueued = useRef(false);
   const mode = runtimeMode();
   const deferredSearchQuery = useDeferredValue(searchQuery);
 
   async function refreshAll() {
+    if (refreshInFlight.current) {
+      refreshQueued.current = true;
+      return;
+    }
+    refreshInFlight.current = true;
     try {
       const nextSnapshot = await call<AppSnapshot>("load_snapshot");
       const nextLogs = await call<string[]>("tail_logs", { limit: 160 });
@@ -395,7 +410,7 @@ function App() {
       if (!bulkModel) {
         setBulkModel(
           nextSnapshot.models.find(
-            (option) => option.model === "custom:gpt-5.4(xhigh)",
+            (option) => option.displayName === "GPT-5.4 (XHigh)",
           )?.model ??
             nextSnapshot.models[0]?.model ??
             "inherit",
@@ -407,6 +422,12 @@ function App() {
         return;
       }
       setError(String(cause));
+    } finally {
+      refreshInFlight.current = false;
+      if (refreshQueued.current && mounted.current) {
+        refreshQueued.current = false;
+        void refreshAll();
+      }
     }
   }
 
@@ -454,6 +475,38 @@ function App() {
       "doctor",
       () => call<CommandResult>("run_doctor"),
       (result) => setDoctorOutput((result as CommandResult).output.trim()),
+    );
+  }
+
+  async function handleLogin() {
+    await runAction(
+      "login",
+      () => call<CommandResult>("run_login"),
+      (result) => setAuthOutput((result as CommandResult).output.trim()),
+    );
+  }
+
+  async function handleGenerationProbe() {
+    await runAction(
+      "probe-generation",
+      () => call<CommandResult>("probe_generation"),
+      (result) => setGenerationOutput((result as CommandResult).output.trim()),
+    );
+  }
+
+  async function handleDroidProbe() {
+    await runAction(
+      "probe-droid",
+      () => call<CommandResult>("probe_droid"),
+      (result) => setDroidSmokeOutput((result as CommandResult).output.trim()),
+    );
+  }
+
+  async function handleFactorySync() {
+    await runAction(
+      "sync:manual",
+      () => call<CommandResult>("sync_factory"),
+      (result) => setFactorySyncOutput((result as CommandResult).output.trim()),
     );
   }
 
@@ -892,15 +945,23 @@ function App() {
                   <p className="eyebrow">Auth Signal</p>
                   <HelpTip
                     label="Auth Signal"
-                    text="Shows which OpenAI account is active and how long the current auth is expected to stay valid."
+                    text="Shows whether Codex sign-in is ready and how long the current auth is expected to stay valid."
                     placement="bottom"
                   />
                 </div>
-                <h3>
-                  <SensitiveValue
-                    value={snapshot?.gateway.auth.activeAccount}
-                    keep={16}
-                  />
+                <h3
+                  className={
+                    snapshot?.gateway.auth.issue ? "status-board__issue" : ""
+                  }
+                >
+                  {snapshot?.gateway.auth.issue ? (
+                    snapshot.gateway.auth.issue
+                  ) : (
+                    <SensitiveValue
+                      value={snapshot?.gateway.auth.activeAccount}
+                      keep={16}
+                    />
+                  )}
                 </h3>
                 <dl className="mini-facts">
                   <div>
@@ -916,6 +977,22 @@ function App() {
                     </dd>
                   </div>
                 </dl>
+                {mode === "desktop" ? (
+                  <button
+                    className="button button--utility status-board__action"
+                    onClick={() => void handleLogin()}
+                    disabled={busyAction !== null}
+                  >
+                    {busyAction === "login"
+                      ? "Signing in..."
+                      : snapshot?.gateway.auth.issue
+                        ? "Sign in"
+                        : "Refresh sign-in"}
+                  </button>
+                ) : null}
+                {authOutput ? (
+                  <p className="status-board__note">{authOutput}</p>
+                ) : null}
               </div>
 
               <div className="status-board__lane">
@@ -947,6 +1024,47 @@ function App() {
                   </div>
                 </dl>
               </div>
+
+              <div className="status-board__lane">
+                <p className="eyebrow">Native Harness</p>
+                <h3>
+                  {snapshot?.nativeHarness.modeRecommendation ?? "setup-required"}
+                </h3>
+                <dl className="mini-facts">
+                  <div>
+                    <dt>Factory Desktop</dt>
+                    <dd>
+                      {readinessLabel(
+                        snapshot?.nativeHarness.factoryDesktop.issue ?? "missing",
+                      )}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>Droid</dt>
+                    <dd>
+                      {readinessLabel(
+                        snapshot?.nativeHarness.droid.issue ?? "missing",
+                      )}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>Codex app-server</dt>
+                    <dd>
+                      {readinessLabel(
+                        snapshot?.nativeHarness.codex.issue ?? "missing",
+                      )}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>API key</dt>
+                    <dd>
+                      {snapshot?.nativeHarness.byokRequired
+                        ? "BYOK"
+                        : "No API key"}
+                    </dd>
+                  </div>
+                </dl>
+              </div>
             </section>
 
             <article className="panel doctor-panel">
@@ -963,6 +1081,29 @@ function App() {
                   >
                     {busyAction === "doctor" ? "Running..." : "Run Doctor"}
                   </button>
+                  <button
+                    className="button button--accent"
+                    onClick={() => void handleGenerationProbe()}
+                    disabled={busyAction !== null || !snapshot?.gateway.running}
+                  >
+                    {busyAction === "probe-generation"
+                      ? "Probing..."
+                      : "Probe Generation"}
+                  </button>
+                  <button
+                    className="button button--accent"
+                    onClick={() => void handleDroidProbe()}
+                    disabled={
+                      busyAction !== null ||
+                      !snapshot?.gateway.running ||
+                      !snapshot?.workspacePath ||
+                      Boolean(snapshot?.nativeHarness.droid.issue)
+                    }
+                  >
+                    {busyAction === "probe-droid"
+                      ? "Probing..."
+                      : "Probe Droid"}
+                  </button>
                   <HelpTip
                     label="Run Doctor"
                     text="Runs the built-in health sweep so you can see config drift, auth issues, and runtime problems."
@@ -973,6 +1114,12 @@ function App() {
               </div>
               <pre className="log-block log-block--compact">
                 {doctorOutput || "No doctor run yet."}
+              </pre>
+              <pre className="log-block log-block--compact">
+                {generationOutput || "No generation probe yet."}
+              </pre>
+              <pre className="log-block log-block--compact">
+                {droidSmokeOutput || "No Droid probe yet."}
               </pre>
             </article>
           </div>
@@ -1280,8 +1427,21 @@ function App() {
         >
           <div className="factory-grid">
             <article className="panel factory-card factory-card--wide">
-              <p className="eyebrow">Factory Blueprint</p>
-              <h2>Config and settings anchors</h2>
+              <div className="panel-heading panel-heading--tight">
+                <div>
+                  <p className="eyebrow">Factory Blueprint</p>
+                  <h2>Config and settings anchors</h2>
+                </div>
+                <button
+                  className="button button--accent"
+                  onClick={() => void handleFactorySync()}
+                  disabled={busyAction !== null}
+                >
+                  {busyAction === "sync:manual"
+                    ? "Configuring..."
+                    : "Configure Factory"}
+                </button>
+              </div>
               <dl className="fact-list">
                 <div>
                   <dt>Factory home</dt>
@@ -1308,6 +1468,11 @@ function App() {
                   <dd>{snapshot?.factory.settingsCustomModelCount ?? 0}</dd>
                 </div>
               </dl>
+              {factorySyncOutput ? (
+                <pre className="log-block log-block--compact">
+                  {factorySyncOutput}
+                </pre>
+              ) : null}
             </article>
 
             <article className="panel factory-card">

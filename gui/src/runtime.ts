@@ -46,6 +46,12 @@ export async function call<T>(
       return fetchBridge<T>("/stop", { method: "POST" });
     case "run_doctor":
       return fetchBridge<T>("/doctor", { method: "POST" });
+    case "run_login":
+      throw new Error("Codex sign-in from the GUI requires the desktop app.");
+    case "probe_generation":
+      return fetchBridge<T>("/probe-generation", { method: "POST" });
+    case "probe_droid":
+      return fetchBridge<T>("/probe-droid", { method: "POST" });
     case "sync_factory":
       return fetchBridge<T>("/sync-factory", { method: "POST" });
     case "set_droid_model":

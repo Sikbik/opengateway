@@ -6,6 +6,7 @@ export interface AppSnapshot {
   environment: EnvironmentSnapshot;
   gateway: GatewaySnapshot;
   factory: FactorySnapshot;
+  nativeHarness: NativeHarnessSnapshot;
   models: ModelOption[];
   droids: DroidRecord[];
 }
@@ -33,6 +34,7 @@ export interface AuthSnapshot {
   activeAccount: string | null;
   expiresAtMs: number | null;
   expiresInMinutes: number | null;
+  issue: string | null;
 }
 
 export interface FactorySnapshot {
@@ -45,6 +47,39 @@ export interface FactorySnapshot {
   sessionDefaultModel: string | null;
   missionModels: MissionModels;
   issues: string[];
+}
+
+export interface FactoryDesktopReadiness {
+  installed: boolean;
+  installDir: string | null;
+  version: string | null;
+  bundledDroidPath: string | null;
+  issue: string | null;
+}
+
+export interface DroidReadiness {
+  executable: string | null;
+  version: string | null;
+  supportsExec: boolean;
+  supportsStreamJsonrpc: boolean;
+  supportsDaemonIpc: boolean;
+  issue: string | null;
+}
+
+export interface CodexReadiness {
+  executable: string | null;
+  version: string | null;
+  supportsAppServer: boolean;
+  supportsGenerateSchema: boolean;
+  issue: string | null;
+}
+
+export interface NativeHarnessSnapshot {
+  factoryDesktop: FactoryDesktopReadiness;
+  droid: DroidReadiness;
+  codex: CodexReadiness;
+  modeRecommendation: string;
+  byokRequired: boolean;
 }
 
 export interface MissionModels {

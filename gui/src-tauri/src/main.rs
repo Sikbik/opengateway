@@ -4,6 +4,7 @@
 )]
 
 mod control;
+mod runtime_target;
 
 fn main() {
     let builder = tauri::Builder::default();
@@ -22,6 +23,9 @@ fn main() {
             control::start_gateway,
             control::stop_gateway,
             control::run_doctor,
+            control::run_login,
+            control::probe_generation,
+            control::probe_droid,
             control::sync_factory,
             control::set_droid_model,
         ])

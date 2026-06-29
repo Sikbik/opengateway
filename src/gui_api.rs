@@ -1,16 +1,22 @@
 use anyhow::{anyhow, Context, Result};
 use serde::Serialize;
 use serde_json::Value;
+use std::collections::HashSet;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use crate::droid_files::{
+    flag_unavailable_custom_models, merge_droids, read_droids,
+    set_droid_model as set_droid_record_model, DroidRecord, WORKSPACE_DROIDS_RELATIVE,
+};
+use crate::factory_desktop::FactoryDesktopReadiness;
 use crate::paths::{build_factory_paths, build_paths};
+use crate::tool_probe::{CodexReadiness, DroidReadiness};
 
 const GATEWAY_URL: &str = "http://127.0.0.1:42069";
-const WORKSPACE_DROIDS_RELATIVE: &str = ".factory/droids";
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -20,6 +26,7 @@ pub struct AppSnapshot {
     environment: EnvironmentSnapshot,
     gateway: GatewaySnapshot,
     factory: FactorySnapshot,
+    native_harness: NativeHarnessSnapshot,
     models: Vec<ModelOption>,
     droids: Vec<DroidRecord>,
 }
@@ -53,6 +60,7 @@ pub struct AuthSnapshot {
     active_account: Option<String>,
     expires_at_ms: Option<i64>,
     expires_in_minutes: Option<i64>,
+    issue: Option<&'static str>,
 }
 
 #[derive(Debug, Serialize)]
@@ -71,6 +79,16 @@ pub struct FactorySnapshot {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct NativeHarnessSnapshot {
+    factory_desktop: FactoryDesktopReadiness,
+    droid: DroidReadiness,
+    codex: CodexReadiness,
+    mode_recommendation: &'static str,
+    byok_required: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct MissionModels {
     orchestrator: Option<String>,
     worker: Option<String>,
@@ -84,17 +102,6 @@ pub struct ModelOption {
     model: String,
     id: Option<String>,
     source: String,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DroidRecord {
-    name: String,
-    path: String,
-    scope: &'static str,
-    model: Option<String>,
-    kind: &'static str,
-    issues: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -132,8 +139,62 @@ pub fn print_command_result_json(command: &[&str]) -> Result<()> {
     Ok(())
 }
 
+pub fn print_login_json() -> Result<()> {
+    print_command_result_json(&gui_login_command_args())
+}
+
+pub fn print_factory_droid_smoke_json() -> Result<()> {
+    let output = run_factory_droid_smoke_text()?;
+    println!(
+        "{}",
+        serde_json::to_string(&CommandResult {
+            success: true,
+            output
+        })
+        .context("failed to encode Droid smoke result")?
+    );
+    Ok(())
+}
+
+pub fn run_factory_droid_smoke_text() -> Result<String> {
+    let factory_paths = build_factory_paths()?;
+    let factory = read_factory_snapshot(&factory_paths);
+    let model = factory.session_default_model.ok_or_else(|| {
+        anyhow!("Factory session default model is not set; run `opengateway sync-factory` first")
+    })?;
+    let workspace = detect_workspace_root()
+        .ok_or_else(|| anyhow!("could not resolve the current workspace path"))?;
+    let factory_desktop = crate::factory_desktop::probe_factory_desktop();
+    let executable = factory_desktop
+        .bundled_droid_path
+        .map(PathBuf::from)
+        .ok_or_else(|| {
+            anyhow!(
+                "{}",
+                factory_desktop.issue.unwrap_or_else(|| {
+                    "Factory Desktop bundled Droid executable was not found".to_string()
+                })
+            )
+        })?;
+    let result = crate::droid_smoke::run_factory_droid_smoke(
+        &factory_paths.home_dir,
+        &executable,
+        &workspace,
+        &model,
+    )?;
+    Ok(crate::droid_smoke::format_droid_smoke_result(&result))
+}
+
 pub fn print_droid_model_update_json(path: &Path, model: &str) -> Result<()> {
-    let record = set_droid_model(path, model)?;
+    let factory_paths = build_factory_paths()?;
+    let workspace_droids_dir =
+        detect_workspace_root().map(|workspace| workspace.join(WORKSPACE_DROIDS_RELATIVE));
+    let record = set_droid_record_model(
+        path,
+        model,
+        &factory_paths.machine_droids_dir,
+        workspace_droids_dir.as_deref(),
+    )?;
     println!(
         "{}",
         serde_json::to_string(&record).context("failed to encode droid record")?
@@ -150,8 +211,23 @@ fn load_snapshot() -> Result<AppSnapshot> {
         .as_ref()
         .map(|path| read_droids(&path.join(WORKSPACE_DROIDS_RELATIVE), "workspace"))
         .unwrap_or_default();
+    let models = read_model_catalog();
+    let installed_model_ids = models
+        .iter()
+        .map(|model| model.model.clone())
+        .collect::<HashSet<_>>();
+    let mut droids = merge_droids(workspace_droids, machine_droids);
+    flag_unavailable_custom_models(&mut droids, &installed_model_ids);
 
     let factory = read_factory_snapshot(&factory_paths);
+    let factory_desktop = crate::factory_desktop::probe_factory_desktop();
+    let preferred_droid = factory_desktop
+        .bundled_droid_path
+        .as_ref()
+        .map(PathBuf::from);
+    let droid = crate::tool_probe::probe_droid_cli(preferred_droid);
+    let codex = crate::tool_probe::probe_codex_cli();
+    let native_harness = build_native_harness_snapshot(factory_desktop, droid, codex);
 
     Ok(AppSnapshot {
         generated_at: now_millis(),
@@ -159,9 +235,37 @@ fn load_snapshot() -> Result<AppSnapshot> {
         environment: environment_snapshot(),
         gateway: read_gateway_snapshot(&paths, &factory),
         factory,
-        models: read_model_catalog(),
-        droids: merge_droids(workspace_droids, machine_droids),
+        native_harness,
+        models,
+        droids,
     })
+}
+
+fn build_native_harness_snapshot(
+    factory_desktop: FactoryDesktopReadiness,
+    droid: DroidReadiness,
+    codex: CodexReadiness,
+) -> NativeHarnessSnapshot {
+    let factory_droid_ready = factory_desktop.installed
+        && factory_desktop.bundled_droid_path.is_some()
+        && droid.issue.is_none();
+    let mode_recommendation = if factory_droid_ready {
+        "factory-droid-native"
+    } else if droid.issue.is_none() {
+        "droid-cli-native"
+    } else if codex.issue.is_none() {
+        "codex-app-server"
+    } else {
+        "setup-required"
+    };
+
+    NativeHarnessSnapshot {
+        factory_desktop,
+        droid,
+        codex,
+        mode_recommendation,
+        byok_required: false,
+    }
 }
 
 fn environment_snapshot() -> EnvironmentSnapshot {
@@ -182,15 +286,10 @@ fn read_gateway_snapshot(
     paths: &crate::paths::AppPaths,
     factory: &FactorySnapshot,
 ) -> GatewaySnapshot {
-    let pid = crate::read_pid(&paths.pid_file).map(|value| value as u32);
+    let pid = read_live_gateway_pid(&paths.pid_file);
     let http_ready = crate::is_http_ready("127.0.0.1", 42069, Duration::from_millis(500));
     let port_ready = crate::is_port_open("127.0.0.1", 42069, Duration::from_millis(300));
-    let health = match (http_ready, port_ready, pid.is_some()) {
-        (true, _, true) => "online",
-        (true, _, false) => "degraded",
-        (false, true, _) => "degraded",
-        (false, false, _) => "offline",
-    };
+    let health = gateway_health(http_ready, port_ready, pid);
 
     GatewaySnapshot {
         running: health != "offline",
@@ -200,10 +299,45 @@ fn read_gateway_snapshot(
         log_path: paths.log_file.display().to_string(),
         preferred_model: factory.session_default_model.clone(),
         auth: read_auth_snapshot(&paths.auth_dir.join("auth.json")),
-        last_log_line: crate::tail_file(&paths.log_file, 1)
-            .ok()
-            .and_then(|mut items| items.pop()),
+        last_log_line: last_gateway_log_line(&paths.log_file),
     }
+}
+
+fn read_live_gateway_pid(pid_file: &Path) -> Option<u32> {
+    let pid = crate::read_pid(pid_file)?;
+    if crate::pid_running(pid) {
+        Some(pid as u32)
+    } else {
+        crate::remove_pid(pid_file);
+        None
+    }
+}
+
+fn gateway_health(http_ready: bool, port_ready: bool, pid: Option<u32>) -> &'static str {
+    match (http_ready, port_ready, pid.is_some()) {
+        (true, _, true) => "online",
+        (true, _, false) => "degraded",
+        (false, true, _) => "degraded",
+        (false, false, true) => "degraded",
+        (false, false, false) => "offline",
+    }
+}
+
+fn last_gateway_log_line(log_file: &Path) -> Option<String> {
+    crate::tail_file(log_file, 80)
+        .ok()?
+        .into_iter()
+        .rev()
+        .find(|line| is_gateway_log_entry(line))
+}
+
+fn is_gateway_log_entry(line: &str) -> bool {
+    let bytes = line.as_bytes();
+    bytes.len() > 15
+        && bytes[0] == b'['
+        && bytes[14] == b']'
+        && bytes[15] == b' '
+        && bytes[1..14].iter().all(u8::is_ascii_digit)
 }
 
 fn read_auth_snapshot(path: &Path) -> AuthSnapshot {
@@ -246,7 +380,22 @@ fn read_auth_snapshot(path: &Path) -> AuthSnapshot {
         active_account,
         expires_at_ms,
         expires_in_minutes,
+        issue: auth_issue(account_count, expires_in_minutes),
     }
+}
+
+fn auth_issue(account_count: usize, expires_in_minutes: Option<i64>) -> Option<&'static str> {
+    if account_count == 0 {
+        return Some("Codex sign-in is required.");
+    }
+    if matches!(expires_in_minutes, Some(0)) {
+        return Some("Codex sign-in has expired.");
+    }
+    None
+}
+
+fn gui_login_command_args() -> Vec<&'static str> {
+    vec!["login", "browser", "--open-browser"]
 }
 
 fn read_factory_snapshot(factory_paths: &crate::paths::FactoryPaths) -> FactorySnapshot {
@@ -322,6 +471,12 @@ fn read_factory_snapshot(factory_paths: &crate::paths::FactoryPaths) -> FactoryS
             ));
         }
     }
+    if let Some(issue) = recent_session_model_pin_issue(
+        &factory_paths.home_dir.join("sessions"),
+        session_default_model.as_deref(),
+    ) {
+        issues.push(issue);
+    }
 
     FactorySnapshot {
         home_path: factory_paths.home_dir.display().to_string(),
@@ -348,15 +503,7 @@ fn read_model_catalog() -> Vec<ModelOption> {
         .map(|items| {
             items
                 .iter()
-                .filter_map(|item| {
-                    let raw_model = item.get("model")?.as_str()?.to_string();
-                    Some(ModelOption {
-                        display_name: item.get("displayName")?.as_str()?.to_string(),
-                        model: format!("custom:{raw_model}"),
-                        id: item.get("id").and_then(Value::as_str).map(str::to_string),
-                        source: "factory-settings".to_string(),
-                    })
-                })
+                .filter_map(model_option_from_factory_settings_item)
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
@@ -365,170 +512,17 @@ fn read_model_catalog() -> Vec<ModelOption> {
     models
 }
 
-fn merge_droids(
-    mut workspace: Vec<DroidRecord>,
-    mut machine: Vec<DroidRecord>,
-) -> Vec<DroidRecord> {
-    workspace.sort_by(|left, right| left.name.cmp(&right.name));
-    machine.sort_by(|left, right| left.name.cmp(&right.name));
-    workspace.extend(machine);
-    workspace
-}
-
-fn read_droids(dir: &Path, scope: &'static str) -> Vec<DroidRecord> {
-    let entries = match fs::read_dir(dir) {
-        Ok(entries) => entries,
-        Err(_) => return Vec::new(),
-    };
-
-    let mut droids = Vec::new();
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|value| value.to_str()) != Some("md") {
-            continue;
-        }
-        if let Ok(record) = parse_droid_file(&path, scope) {
-            droids.push(record);
-        }
-    }
-    droids
-}
-
-fn set_droid_model(path: &Path, model: &str) -> Result<DroidRecord> {
-    validate_droid_path(path)?;
-    let original =
-        fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
-    let normalized_model = normalize_droid_model(model);
-    let updated = update_front_matter_model(&original, &normalized_model)?;
-    fs::write(path, updated).with_context(|| format!("failed to write {}", path.display()))?;
-    parse_droid_file(path, classify_scope(path))
-}
-
-fn normalize_droid_model(model: &str) -> String {
-    let trimmed = model.trim();
-    if trimmed.is_empty() || trimmed == "inherit" || trimmed.starts_with("custom:") {
-        trimmed.to_string()
-    } else {
-        format!("custom:{trimmed}")
-    }
-}
-
-fn parse_droid_file(path: &Path, scope: &'static str) -> Result<DroidRecord> {
-    let raw =
-        fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
-    let front_matter = extract_front_matter(&raw)?;
-    let name = front_matter
-        .lines()
-        .find_map(|line| {
-            line.strip_prefix("name:")
-                .map(|value| value.trim().to_string())
-        })
-        .unwrap_or_else(|| {
-            path.file_stem()
-                .and_then(|value| value.to_str())
-                .unwrap_or("unknown")
-                .to_string()
-        });
-    let model = front_matter.lines().find_map(|line| {
-        line.strip_prefix("model:")
-            .map(|value| value.trim().to_string())
-    });
-
-    let kind = match model.as_deref() {
-        Some(value) if value.starts_with("custom:") => "custom",
-        Some("inherit") => "inherit",
-        Some(_) => "builtin",
-        None => "missing",
-    };
-
-    let mut issues = Vec::new();
-    if kind == "builtin" {
-        issues.push("Pinned to a non-custom model.".to_string());
-    }
-    if kind == "missing" {
-        issues.push("No model declared in front matter.".to_string());
-    }
-
-    Ok(DroidRecord {
-        name,
-        path: path.display().to_string(),
-        scope,
-        model,
-        kind,
-        issues,
+fn model_option_from_factory_settings_item(item: &Value) -> Option<ModelOption> {
+    let raw_model = item.get("model")?.as_str()?.to_string();
+    let factory_model_id = item.get("id").and_then(Value::as_str).map(str::to_string);
+    Some(ModelOption {
+        display_name: item.get("displayName")?.as_str()?.to_string(),
+        model: factory_model_id
+            .clone()
+            .unwrap_or_else(|| format!("custom:{raw_model}")),
+        id: factory_model_id,
+        source: "factory-settings".to_string(),
     })
-}
-
-fn validate_droid_path(path: &Path) -> Result<()> {
-    let factory_paths = build_factory_paths()?;
-    let home_dir = factory_paths.machine_droids_dir;
-    let workspace_dir = detect_workspace_root()
-        .map(|path| path.join(WORKSPACE_DROIDS_RELATIVE))
-        .unwrap_or_else(|| PathBuf::from("__missing__"));
-    let canonical = path
-        .canonicalize()
-        .with_context(|| format!("failed to resolve {}", path.display()))?;
-
-    if canonical.starts_with(&home_dir) || canonical.starts_with(&workspace_dir) {
-        Ok(())
-    } else {
-        Err(anyhow!(
-            "refusing to edit a file outside the allowed droid directories"
-        ))
-    }
-}
-
-fn classify_scope(path: &Path) -> &'static str {
-    let machine_dir = build_factory_paths()
-        .map(|paths| paths.machine_droids_dir)
-        .unwrap_or_else(|_| PathBuf::from("__missing__"));
-    if path.starts_with(machine_dir) {
-        "machine"
-    } else {
-        "workspace"
-    }
-}
-
-fn extract_front_matter(contents: &str) -> Result<&str> {
-    let without_open = contents
-        .strip_prefix("---\n")
-        .ok_or_else(|| anyhow!("file does not start with front matter"))?;
-    let end = without_open
-        .find("\n---\n")
-        .ok_or_else(|| anyhow!("front matter closing marker not found"))?;
-    Ok(&without_open[..end])
-}
-
-fn update_front_matter_model(contents: &str, model: &str) -> Result<String> {
-    let without_open = contents
-        .strip_prefix("---\n")
-        .ok_or_else(|| anyhow!("file does not start with front matter"))?;
-    let end = without_open
-        .find("\n---\n")
-        .ok_or_else(|| anyhow!("front matter closing marker not found"))?;
-    let front_matter = &without_open[..end];
-    let body = &without_open[end + 5..];
-
-    let mut found = false;
-    let mut next_front_matter = Vec::new();
-    for line in front_matter.lines() {
-        if line.trim_start().starts_with("model:") {
-            next_front_matter.push(format!("model: {model}"));
-            found = true;
-        } else {
-            next_front_matter.push(line.to_string());
-        }
-    }
-
-    if !found {
-        next_front_matter.push(format!("model: {model}"));
-    }
-
-    Ok(format!(
-        "---\n{}\n---\n{}",
-        next_front_matter.join("\n"),
-        body
-    ))
 }
 
 fn read_json_file(path: &Path) -> Value {
@@ -536,6 +530,79 @@ fn read_json_file(path: &Path) -> Value {
         .ok()
         .and_then(|content| serde_json::from_str::<Value>(&content).ok())
         .unwrap_or_else(|| Value::Object(Default::default()))
+}
+
+fn recent_session_model_pin_issue(
+    sessions_dir: &Path,
+    session_default_model: Option<&str>,
+) -> Option<String> {
+    let session_default_model = session_default_model?.trim();
+    if session_default_model.is_empty() {
+        return None;
+    }
+
+    let mut files = Vec::new();
+    for project_entry in fs::read_dir(sessions_dir).ok()?.flatten() {
+        let project_path = project_entry.path();
+        if !project_path.is_dir() {
+            continue;
+        }
+        for file_entry in fs::read_dir(project_path).ok()?.flatten() {
+            let file_path = file_entry.path();
+            if file_path.extension().and_then(|value| value.to_str()) != Some("jsonl") {
+                continue;
+            }
+            let modified = file_entry
+                .metadata()
+                .ok()
+                .and_then(|metadata| metadata.modified().ok())
+                .unwrap_or(UNIX_EPOCH);
+            files.push((modified, file_path));
+        }
+    }
+    files.sort_by_key(|entry| std::cmp::Reverse(entry.0));
+
+    for (_, path) in files.into_iter().take(20) {
+        let Some(model_id) = latest_assistant_model_id(&path) else {
+            continue;
+        };
+        if model_id != session_default_model {
+            let name = path
+                .file_name()
+                .map(|value| value.to_string_lossy().to_string())
+                .unwrap_or_else(|| "session".to_string());
+            return Some(format!(
+                "Recent Factory session `{name}` is pinned to `{model_id}`; start a new session to use `{session_default_model}`."
+            ));
+        }
+    }
+
+    None
+}
+
+fn latest_assistant_model_id(path: &Path) -> Option<String> {
+    let raw = fs::read_to_string(path).ok()?;
+    let mut latest = None;
+    for line in raw.lines() {
+        let Ok(value) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        let Some(message) = value.get("message") else {
+            continue;
+        };
+        if message.get("role").and_then(Value::as_str) != Some("assistant") {
+            continue;
+        }
+        if let Some(model_id) = message
+            .get("modelId")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            latest = Some(model_id.to_string());
+        }
+    }
+    latest
 }
 
 fn detect_workspace_root() -> Option<PathBuf> {
@@ -568,16 +635,36 @@ fn detect_wsl() -> bool {
 
 fn run_self_command(args: &[&str]) -> Result<CommandResult> {
     let current_exe = env::current_exe().context("failed to resolve current executable")?;
-    let output = Command::new(current_exe)
+    let capture_path = env::temp_dir().join(format!(
+        "opengateway-gui-command-{}-{}.log",
+        now_millis(),
+        std::process::id()
+    ));
+    let stdout = fs::File::create(&capture_path).with_context(|| {
+        format!(
+            "failed to create command capture file {}",
+            capture_path.display()
+        )
+    })?;
+    let stderr = stdout
+        .try_clone()
+        .context("failed to clone command capture file")?;
+
+    let status = Command::new(current_exe)
         .args(args)
-        .output()
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr))
+        .status()
         .context("failed to execute opengateway command")?;
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let combined = format!("{}{}", stdout, stderr).trim().to_string();
+    let combined = fs::read_to_string(&capture_path)
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    let _ = fs::remove_file(&capture_path);
 
-    if output.status.success() {
+    if status.success() {
         Ok(CommandResult {
             success: true,
             output: if combined.is_empty() {
@@ -588,7 +675,7 @@ fn run_self_command(args: &[&str]) -> Result<CommandResult> {
         })
     } else {
         Err(anyhow!(if combined.is_empty() {
-            format!("command failed with status {}", output.status)
+            format!("command failed with status {status}")
         } else {
             combined
         }))
@@ -600,4 +687,255 @@ fn now_millis() -> i64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default();
     duration.as_millis() as i64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recommends_factory_droid_when_droid_is_ready() {
+        let snapshot = build_native_harness_snapshot(
+            FactoryDesktopReadiness {
+                installed: true,
+                install_dir: Some("C:/Users/example/AppData/Local/Factory/app-0.116.1".to_string()),
+                version: Some("0.116.1".to_string()),
+                bundled_droid_path: Some(
+                    "C:/Users/example/AppData/Local/Factory/app-0.116.1/resources/bin/droid.exe"
+                        .to_string(),
+                ),
+                issue: None,
+            },
+            DroidReadiness {
+                executable: Some("droid".to_string()),
+                version: Some("0.159.1".to_string()),
+                supports_exec: true,
+                supports_stream_jsonrpc: true,
+                supports_daemon_ipc: true,
+                issue: None,
+            },
+            CodexReadiness {
+                executable: Some("codex".to_string()),
+                version: Some("codex 26.623.5546".to_string()),
+                supports_app_server: true,
+                supports_generate_schema: true,
+                issue: None,
+            },
+        );
+
+        assert_eq!(snapshot.mode_recommendation, "factory-droid-native");
+        assert!(!snapshot.byok_required);
+    }
+
+    #[test]
+    fn recommends_codex_when_droid_is_not_ready() {
+        let snapshot = build_native_harness_snapshot(
+            FactoryDesktopReadiness {
+                installed: false,
+                install_dir: None,
+                version: None,
+                bundled_droid_path: None,
+                issue: Some("Factory Desktop install was not found".to_string()),
+            },
+            DroidReadiness {
+                executable: Some("droid".to_string()),
+                version: None,
+                supports_exec: false,
+                supports_stream_jsonrpc: false,
+                supports_daemon_ipc: false,
+                issue: Some("Droid CLI was not found or could not be executed".to_string()),
+            },
+            CodexReadiness {
+                executable: Some("codex".to_string()),
+                version: Some("codex 26.623.5546".to_string()),
+                supports_app_server: true,
+                supports_generate_schema: true,
+                issue: None,
+            },
+        );
+
+        assert_eq!(snapshot.mode_recommendation, "codex-app-server");
+        assert!(!snapshot.byok_required);
+    }
+
+    #[test]
+    fn recommends_droid_cli_when_factory_desktop_is_missing() {
+        let snapshot = build_native_harness_snapshot(
+            FactoryDesktopReadiness {
+                installed: false,
+                install_dir: None,
+                version: None,
+                bundled_droid_path: None,
+                issue: Some("Factory Desktop install was not found".to_string()),
+            },
+            DroidReadiness {
+                executable: Some("droid".to_string()),
+                version: Some("0.159.1".to_string()),
+                supports_exec: true,
+                supports_stream_jsonrpc: true,
+                supports_daemon_ipc: true,
+                issue: None,
+            },
+            CodexReadiness {
+                executable: Some("codex".to_string()),
+                version: Some("codex 26.623.5546".to_string()),
+                supports_app_server: true,
+                supports_generate_schema: true,
+                issue: None,
+            },
+        );
+
+        assert_eq!(snapshot.mode_recommendation, "droid-cli-native");
+        assert!(!snapshot.byok_required);
+    }
+
+    #[test]
+    fn recommends_setup_when_droid_and_codex_are_not_ready() {
+        let snapshot = build_native_harness_snapshot(
+            FactoryDesktopReadiness {
+                installed: false,
+                install_dir: None,
+                version: None,
+                bundled_droid_path: None,
+                issue: Some("Factory Desktop install was not found".to_string()),
+            },
+            DroidReadiness {
+                executable: Some("droid".to_string()),
+                version: None,
+                supports_exec: false,
+                supports_stream_jsonrpc: false,
+                supports_daemon_ipc: false,
+                issue: Some("Droid CLI was not found or could not be executed".to_string()),
+            },
+            CodexReadiness {
+                executable: Some("codex".to_string()),
+                version: None,
+                supports_app_server: false,
+                supports_generate_schema: false,
+                issue: Some("Codex CLI was not found or could not be executed".to_string()),
+            },
+        );
+
+        assert_eq!(snapshot.mode_recommendation, "setup-required");
+        assert!(!snapshot.byok_required);
+    }
+
+    #[test]
+    fn model_catalog_uses_factory_custom_model_id() {
+        let item = serde_json::json!({
+            "model": "gpt-5.4(xhigh)",
+            "id": "custom:GPT-5.4-(XHigh)-24",
+            "displayName": "GPT-5.4 (XHigh)"
+        });
+
+        let option = model_option_from_factory_settings_item(&item).unwrap();
+
+        assert_eq!(option.model, "custom:GPT-5.4-(XHigh)-24");
+        assert_eq!(option.id.as_deref(), Some("custom:GPT-5.4-(XHigh)-24"));
+        assert_eq!(option.display_name, "GPT-5.4 (XHigh)");
+    }
+
+    #[test]
+    fn warns_when_recent_factory_session_uses_old_model_pin() {
+        let dir = temp_gateway_dir("stale-session-model");
+        let sessions_dir = dir.join("sessions");
+        let project_dir = sessions_dir.join("--wsl.localhost-Ubuntu-home-stache-projects-demo");
+        fs::create_dir_all(&project_dir).unwrap();
+        let session_file = project_dir.join("session.jsonl");
+        fs::write(
+            &session_file,
+            concat!(
+                "{\"type\":\"session_start\",\"id\":\"session\",\"cwd\":\"demo\"}\n",
+                "{\"type\":\"message\",\"message\":{\"role\":\"assistant\",\"modelId\":\"custom:GPT-5.4-(XHigh)-4\",\"content\":[{\"type\":\"text\",\"text\":\"ok\"}]}}\n"
+            ),
+        )
+        .unwrap();
+
+        assert_eq!(
+            recent_session_model_pin_issue(&sessions_dir, Some("custom:GPT-5.5-26")).as_deref(),
+            Some("Recent Factory session `session.jsonl` is pinned to `custom:GPT-5.4-(XHigh)-4`; start a new session to use `custom:GPT-5.5-26`.")
+        );
+
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn stale_gateway_pid_is_removed_from_snapshot_state() {
+        let dir = temp_gateway_dir("stale-pid");
+        let pid_file = dir.join("opengateway.pid");
+        fs::write(&pid_file, "-1\n").unwrap();
+
+        assert_eq!(read_live_gateway_pid(&pid_file), None);
+        assert!(!pid_file.exists());
+
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn live_gateway_pid_is_reported_in_snapshot_state() {
+        let dir = temp_gateway_dir("live-pid");
+        let pid_file = dir.join("opengateway.pid");
+        fs::write(&pid_file, format!("{}\n", std::process::id())).unwrap();
+
+        assert_eq!(read_live_gateway_pid(&pid_file), Some(std::process::id()));
+
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn gateway_health_marks_live_pid_without_port_as_degraded() {
+        assert_eq!(gateway_health(false, false, Some(123)), "degraded");
+        assert_eq!(gateway_health(false, false, None), "offline");
+    }
+
+    #[test]
+    fn last_gateway_log_line_ignores_multiline_error_body() {
+        let dir = temp_gateway_dir("multiline-log");
+        let log_file = dir.join("opengateway.log");
+        fs::write(
+            &log_file,
+            "[1782696121887] upstream proxy error: failed to refresh access token\n{\n  \"error\": {}\n}\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            last_gateway_log_line(&log_file).as_deref(),
+            Some("[1782696121887] upstream proxy error: failed to refresh access token")
+        );
+
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn auth_issue_requires_account_when_missing() {
+        assert_eq!(auth_issue(0, None), Some("Codex sign-in is required."));
+    }
+
+    #[test]
+    fn auth_issue_flags_expired_account() {
+        assert_eq!(auth_issue(1, Some(0)), Some("Codex sign-in has expired."));
+    }
+
+    #[test]
+    fn auth_issue_allows_valid_account() {
+        assert_eq!(auth_issue(1, Some(1440)), None);
+    }
+
+    #[test]
+    fn gui_login_command_opens_browser() {
+        assert_eq!(
+            gui_login_command_args(),
+            vec!["login", "browser", "--open-browser"]
+        );
+    }
+
+    fn temp_gateway_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "opengateway-gui-api-{name}-{}-{}",
+            std::process::id(),
+            now_millis()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
 }

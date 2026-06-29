@@ -99,6 +99,16 @@ jobs:
         working-directory: gui
         run: npm ci
 
+      - name: Run backend tests
+        run: cargo test
+
+      - name: Lint backend
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Build frontend
+        working-directory: gui
+        run: npm run build
+
       - name: Prepare macOS icon
         if: runner.os == 'macOS'
         run: bash ./gui/scripts/prepare-macos-icon.sh
