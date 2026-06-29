@@ -44,13 +44,8 @@ fn probe_factory_desktop_from_candidates(roots: Vec<PathBuf>) -> FactoryDesktopR
     };
 
     let version = factory_app_version(&install_dir);
-    let bundled_droid = install_dir
-        .join("resources")
-        .join("bin")
-        .join(droid_exe_name());
-    let bundled_droid_path = bundled_droid
-        .is_file()
-        .then(|| bundled_droid.display().to_string());
+    let bundled_droid_path =
+        bundled_droid_path(&install_dir).map(|path| path.display().to_string());
     let issue = if bundled_droid_path.is_some() {
         None
     } else {
@@ -81,7 +76,68 @@ fn factory_roots() -> Vec<PathBuf> {
         }
     }
 
+    if running_in_wsl() {
+        roots.extend(wsl_factory_roots());
+    }
+
+    roots.sort();
+    roots.dedup();
     roots
+}
+
+fn wsl_factory_roots() -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+
+    if let Some(local_app_data) = env_path("OPENGATEWAY_WINDOWS_LOCALAPPDATA") {
+        roots.push(local_app_data.join("Factory"));
+    }
+
+    if let Some(factory_home) = env_path("OPENGATEWAY_FACTORY_HOME") {
+        if let Some(root) = factory_root_from_factory_home(&factory_home) {
+            roots.push(root);
+        }
+    }
+
+    roots.extend(wsl_user_factory_roots(Path::new("/mnt/c/Users")));
+    roots.sort();
+    roots.dedup();
+    roots
+}
+
+fn factory_root_from_factory_home(factory_home: &Path) -> Option<PathBuf> {
+    if factory_home.file_name()?.to_string_lossy() != ".factory" {
+        return None;
+    }
+
+    Some(
+        factory_home
+            .parent()?
+            .join("AppData")
+            .join("Local")
+            .join("Factory"),
+    )
+}
+
+fn wsl_user_factory_roots(users_root: &Path) -> Vec<PathBuf> {
+    let mut roots = fs::read_dir(users_root)
+        .ok()
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .map(|entry| entry.path().join("AppData").join("Local").join("Factory"))
+        .filter(|path| path.is_dir())
+        .collect::<Vec<_>>();
+    roots.sort();
+    roots
+}
+
+fn running_in_wsl() -> bool {
+    env::var_os("WSL_DISTRO_NAME")
+        .map(|value| !value.is_empty())
+        .unwrap_or(false)
+        || fs::read_to_string("/proc/sys/kernel/osrelease")
+            .map(|value| value.to_ascii_lowercase().contains("microsoft"))
+            .unwrap_or(false)
 }
 
 fn env_path(name: &str) -> Option<PathBuf> {
@@ -125,12 +181,25 @@ fn parse_version_parts(raw: &str) -> Option<Vec<u64>> {
         .collect()
 }
 
-fn droid_exe_name() -> &'static str {
+fn bundled_droid_path(install_dir: &Path) -> Option<PathBuf> {
+    let bin_dir = install_dir.join("resources").join("bin");
+    droid_exe_names()
+        .iter()
+        .map(|name| bin_dir.join(name))
+        .find(|path| path.is_file())
+}
+
+fn droid_exe_names() -> &'static [&'static str] {
     if cfg!(windows) {
-        "droid.exe"
+        &["droid.exe"]
     } else {
-        "droid"
+        &["droid", "droid.exe"]
     }
+}
+
+#[cfg(test)]
+fn droid_exe_name() -> &'static str {
+    droid_exe_names()[0]
 }
 
 #[cfg(test)]
@@ -156,6 +225,47 @@ mod tests {
             .unwrap()
             .contains("app-0.116.1"));
         assert_eq!(readiness.issue, None);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn picks_windows_bundled_droid_from_wsl_visible_install() {
+        let root = temp_root("factory-desktop-windows-droid");
+        let bin_dir = root.join("app-0.116.1").join("resources").join("bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+        fs::write(bin_dir.join("droid.exe"), "").unwrap();
+
+        let readiness = probe_factory_desktop_from_candidates(vec![root.clone()]);
+
+        assert!(readiness.installed);
+        assert!(readiness.bundled_droid_path.unwrap().ends_with("droid.exe"));
+        assert_eq!(readiness.issue, None);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn derives_wsl_factory_root_from_factory_home() {
+        let root = factory_root_from_factory_home(Path::new("/mnt/c/Users/alice/.factory"));
+
+        assert_eq!(
+            root.as_deref(),
+            Some(Path::new("/mnt/c/Users/alice/AppData/Local/Factory"))
+        );
+    }
+
+    #[test]
+    fn discovers_wsl_user_factory_roots() {
+        let root = temp_root("factory-desktop-wsl-users");
+        let factory = root
+            .join("alice")
+            .join("AppData")
+            .join("Local")
+            .join("Factory");
+        fs::create_dir_all(&factory).unwrap();
+
+        let roots = wsl_user_factory_roots(&root);
+
+        assert_eq!(roots, vec![factory]);
         fs::remove_dir_all(root).unwrap();
     }
 
