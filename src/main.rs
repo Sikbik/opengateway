@@ -16,7 +16,8 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
 use clap::{Parser, Subcommand, ValueEnum};
 use factory_config::{
-    build_factory_config, resolve_model_ids, sync_factory_files, FactorySyncResult,
+    build_factory_config, factory_settings_needs_sync, resolve_model_ids, sync_factory_files,
+    FactorySyncResult,
 };
 use oauth::LoginMode;
 use paths::{build_paths, AppPaths};
@@ -779,6 +780,7 @@ fn command_start(args: StartArgs) -> Result<()> {
 
     let api_key = resolve_proxy_api_key(&paths.api_key_file, &args.api_key)?;
     let run_args = args.to_run_args(api_key.clone());
+    ensure_factory_runtime_config(&run_args)?;
 
     let background_executable = resolve_background_executable(&paths)?;
     let mut command = Command::new(background_executable);
@@ -874,6 +876,29 @@ fn command_start(args: StartArgs) -> Result<()> {
         }
     }
     Err(anyhow!("startup failed"))
+}
+
+fn ensure_factory_runtime_config(run_args: &RunArgs) -> Result<()> {
+    let model_ids = resolve_model_ids(&run_args.models);
+    let base_url = format!("http://{}:{}", run_args.host, run_args.port);
+    let factory_paths = paths::build_factory_paths()?;
+
+    if factory_settings_needs_sync(
+        &factory_paths.settings_path,
+        &base_url,
+        &run_args.api_key,
+        &model_ids,
+    )? {
+        sync_factory_files(
+            &factory_paths.config_path,
+            &factory_paths.settings_path,
+            &base_url,
+            &run_args.api_key,
+            &model_ids,
+        )?;
+    }
+
+    Ok(())
 }
 
 fn resolve_background_executable(paths: &AppPaths) -> Result<PathBuf> {

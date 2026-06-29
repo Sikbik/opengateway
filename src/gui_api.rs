@@ -5,7 +5,7 @@ use std::collections::HashSet;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::droid_files::{
@@ -635,16 +635,36 @@ fn detect_wsl() -> bool {
 
 fn run_self_command(args: &[&str]) -> Result<CommandResult> {
     let current_exe = env::current_exe().context("failed to resolve current executable")?;
-    let output = Command::new(current_exe)
+    let capture_path = env::temp_dir().join(format!(
+        "opengateway-gui-command-{}-{}.log",
+        now_millis(),
+        std::process::id()
+    ));
+    let stdout = fs::File::create(&capture_path).with_context(|| {
+        format!(
+            "failed to create command capture file {}",
+            capture_path.display()
+        )
+    })?;
+    let stderr = stdout
+        .try_clone()
+        .context("failed to clone command capture file")?;
+
+    let status = Command::new(current_exe)
         .args(args)
-        .output()
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr))
+        .status()
         .context("failed to execute opengateway command")?;
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let combined = format!("{}{}", stdout, stderr).trim().to_string();
+    let combined = fs::read_to_string(&capture_path)
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    let _ = fs::remove_file(&capture_path);
 
-    if output.status.success() {
+    if status.success() {
         Ok(CommandResult {
             success: true,
             output: if combined.is_empty() {
@@ -655,7 +675,7 @@ fn run_self_command(args: &[&str]) -> Result<CommandResult> {
         })
     } else {
         Err(anyhow!(if combined.is_empty() {
-            format!("command failed with status {}", output.status)
+            format!("command failed with status {status}")
         } else {
             combined
         }))

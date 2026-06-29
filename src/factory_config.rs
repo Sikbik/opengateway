@@ -72,6 +72,21 @@ pub fn sync_factory_files(
     })
 }
 
+pub fn factory_settings_needs_sync(
+    settings_path: &Path,
+    base_url: &str,
+    api_key: &str,
+    model_ids: &[String],
+) -> Result<bool> {
+    let existing = fs::read_to_string(settings_path)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+        .unwrap_or_else(|| json!({}));
+    let (_, added, updated, defaults_updated) =
+        merge_factory_settings_document(existing, base_url, api_key, model_ids)?;
+    Ok(added > 0 || updated > 0 || defaults_updated)
+}
+
 pub fn resolve_model_ids(explicit_models: &str) -> Vec<String> {
     let explicit_models = explicit_models.trim();
     if !explicit_models.is_empty() {
@@ -179,8 +194,10 @@ pub fn merge_factory_config(
             continue;
         };
         if let Some(index) = index_by_model.get(model_name).copied() {
-            current_models[index] = model;
-            updated += 1;
+            if current_models[index] != model {
+                current_models[index] = model;
+                updated += 1;
+            }
         } else {
             index_by_model.insert(model_name.to_string(), current_models.len());
             current_models.push(model);
@@ -368,8 +385,10 @@ fn merge_factory_settings_models(
                     .and_then(Value::as_str)
                     .map(str::to_string);
             }
-            current_models[index] = replacement;
-            updated += 1;
+            if current_models[index] != replacement {
+                current_models[index] = replacement;
+                updated += 1;
+            }
         } else {
             let model = build_factory_settings_model(model_id, base_url, api_key, desired_index);
             if model_id == FACTORY_PREFERRED_MODEL {
@@ -702,6 +721,30 @@ mod tests {
     }
 
     #[test]
+    fn factory_settings_merge_is_idempotent_when_managed_models_match() {
+        let models = resolve_model_ids("");
+        let (settings, _, _, _) = merge_factory_settings_document(
+            json!({}),
+            "http://127.0.0.1:42069",
+            "opengateway-local",
+            &models,
+        )
+        .expect("settings merge should succeed");
+
+        let (_, added, updated, defaults_updated) = merge_factory_settings_document(
+            settings,
+            "http://127.0.0.1:42069",
+            "opengateway-local",
+            &models,
+        )
+        .expect("settings merge should succeed");
+
+        assert_eq!(added, 0);
+        assert_eq!(updated, 0);
+        assert!(!defaults_updated);
+    }
+
+    #[test]
     fn creates_factory_files_for_first_run_setup() {
         let root =
             std::env::temp_dir().join(format!("opengateway-factory-first-run-{}", epoch_seconds()));
@@ -738,6 +781,63 @@ mod tests {
         assert!(config.contains("\"custom_models\""));
         assert!(settings.contains("\"customModels\""));
         assert!(settings.contains("\"sessionDefaultSettings\""));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn factory_settings_sync_check_detects_stale_api_key() {
+        let root = std::env::temp_dir().join(format!(
+            "opengateway-factory-sync-check-{}-{}",
+            epoch_seconds(),
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+
+        let config_path = root.join("config.json");
+        let settings_path = root.join("settings.json");
+        let models = vec!["gpt-5.5".to_string()];
+
+        sync_factory_files(
+            &config_path,
+            &settings_path,
+            "http://127.0.0.1:42069",
+            "old-local-key",
+            &models,
+        )
+        .expect("factory sync should succeed");
+
+        assert!(!factory_settings_needs_sync(
+            &settings_path,
+            "http://127.0.0.1:42069",
+            "old-local-key",
+            &models
+        )
+        .expect("settings sync check should succeed"));
+        assert!(factory_settings_needs_sync(
+            &settings_path,
+            "http://127.0.0.1:42069",
+            "rotated-local-key",
+            &models
+        )
+        .expect("settings sync check should succeed"));
+
+        sync_factory_files(
+            &config_path,
+            &settings_path,
+            "http://127.0.0.1:42069",
+            "rotated-local-key",
+            &models,
+        )
+        .expect("factory sync should succeed");
+
+        assert!(!factory_settings_needs_sync(
+            &settings_path,
+            "http://127.0.0.1:42069",
+            "rotated-local-key",
+            &models
+        )
+        .expect("settings sync check should succeed"));
 
         let _ = fs::remove_dir_all(&root);
     }
