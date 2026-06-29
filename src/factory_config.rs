@@ -595,4 +595,45 @@ mod tests {
             Some("xhigh")
         );
     }
+
+    #[test]
+    fn creates_factory_files_for_first_run_setup() {
+        let root =
+            std::env::temp_dir().join(format!("opengateway-factory-first-run-{}", epoch_seconds()));
+        let _ = fs::remove_dir_all(&root);
+
+        let config_path = root.join("config.json");
+        let settings_path = root.join("settings.json");
+        let models = vec!["gpt-5.4(xhigh)".to_string()];
+
+        let (config_added, config_updated, config_backup) = merge_factory_config(
+            &config_path,
+            "http://127.0.0.1:42069",
+            "opengateway-local",
+            &models,
+        )
+        .expect("legacy config merge should succeed");
+        let (settings_added, settings_updated, settings_backup, defaults_updated) =
+            merge_factory_settings(
+                &settings_path,
+                "http://127.0.0.1:42069",
+                "opengateway-local",
+                &models,
+            )
+            .expect("settings merge should succeed");
+
+        assert_eq!((config_added, config_updated), (1, 0));
+        assert_eq!((settings_added, settings_updated), (1, 0));
+        assert!(config_backup.is_none());
+        assert!(settings_backup.is_none());
+        assert!(defaults_updated);
+
+        let config = fs::read_to_string(&config_path).expect("legacy config should be written");
+        let settings = fs::read_to_string(&settings_path).expect("settings should be written");
+        assert!(config.contains("\"custom_models\""));
+        assert!(settings.contains("\"customModels\""));
+        assert!(settings.contains("\"sessionDefaultSettings\""));
+
+        let _ = fs::remove_dir_all(&root);
+    }
 }
