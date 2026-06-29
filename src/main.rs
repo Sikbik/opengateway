@@ -1,4 +1,5 @@
 mod auth_store;
+mod droid_files;
 mod factory_config;
 mod factory_desktop;
 mod gui_api;
