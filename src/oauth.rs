@@ -1,7 +1,6 @@
 use anyhow::{anyhow, bail, Context, Result};
 use base64::engine::general_purpose::{URL_SAFE, URL_SAFE_NO_PAD};
 use base64::Engine as _;
-use rand::Rng;
 use reqwest::blocking::Client;
 use serde::Deserialize;
 use serde_json::Value;
@@ -82,9 +81,9 @@ pub fn refresh_access_token(
 }
 
 fn login_browser(client: &Client, no_browser: bool, verbose: bool) -> Result<OAuthLoginResult> {
-    let pkce_verifier = generate_pkce_verifier(43);
+    let pkce_verifier = generate_pkce_verifier(43)?;
     let pkce_challenge = generate_pkce_challenge(&pkce_verifier);
-    let state = generate_state();
+    let state = generate_state()?;
 
     let (listener, port) = bind_callback_listener()?;
     let redirect_uri = format!("http://localhost:{port}/auth/callback");
@@ -392,15 +391,15 @@ fn parse_poll_interval(raw: Option<&str>) -> Duration {
     Duration::from_secs(seconds) + OAUTH_POLLING_SAFETY_MARGIN
 }
 
-fn generate_pkce_verifier(length: usize) -> String {
+fn generate_pkce_verifier(length: usize) -> Result<String> {
     let chars = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~";
-    let mut rng = rand::thread_rng();
-    (0..length)
-        .map(|_| {
-            let idx = rng.gen_range(0..chars.len());
-            chars[idx] as char
-        })
-        .collect()
+    let mut bytes = vec![0_u8; length];
+    getrandom::getrandom(&mut bytes)
+        .map_err(|err| anyhow!("failed to generate PKCE verifier entropy: {err}"))?;
+    Ok(bytes
+        .into_iter()
+        .map(|byte| chars[byte as usize % chars.len()] as char)
+        .collect())
 }
 
 fn generate_pkce_challenge(verifier: &str) -> String {
@@ -408,10 +407,11 @@ fn generate_pkce_challenge(verifier: &str) -> String {
     URL_SAFE_NO_PAD.encode(digest)
 }
 
-fn generate_state() -> String {
+fn generate_state() -> Result<String> {
     let mut bytes = [0_u8; 32];
-    rand::thread_rng().fill(&mut bytes);
-    URL_SAFE_NO_PAD.encode(bytes)
+    getrandom::getrandom(&mut bytes)
+        .map_err(|err| anyhow!("failed to generate OAuth state entropy: {err}"))?;
+    Ok(URL_SAFE_NO_PAD.encode(bytes))
 }
 
 fn open_browser(url: &str) -> Result<()> {

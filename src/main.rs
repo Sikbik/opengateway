@@ -20,7 +20,6 @@ use factory_config::{
 };
 use oauth::LoginMode;
 use paths::{build_paths, AppPaths};
-use rand::Rng;
 use reqwest::blocking::Client;
 use std::collections::VecDeque;
 #[cfg(windows)]
@@ -1486,7 +1485,7 @@ fn resolve_proxy_api_key(api_key_path: &Path, explicit: &str) -> Result<String> 
         }
     }
 
-    let generated = generate_secret(32);
+    let generated = generate_secret(32)?;
     write_secret_file(api_key_path, &generated)?;
     Ok(generated)
 }
@@ -1534,10 +1533,11 @@ fn write_secret_file(path: &Path, value: &str) -> Result<()> {
     Ok(())
 }
 
-fn generate_secret(byte_len: usize) -> String {
+fn generate_secret(byte_len: usize) -> Result<String> {
     let mut bytes = vec![0_u8; byte_len];
-    rand::thread_rng().fill(&mut bytes[..]);
-    URL_SAFE_NO_PAD.encode(bytes)
+    getrandom::getrandom(&mut bytes)
+        .map_err(|err| anyhow!("failed to generate local API key entropy: {err}"))?;
+    Ok(URL_SAFE_NO_PAD.encode(bytes))
 }
 
 fn read_pid(path: &Path) -> Option<i32> {

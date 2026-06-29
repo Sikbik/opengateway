@@ -4,14 +4,14 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-anyhow = "1.0"
-base64 = "0.22"
-clap = { version = "4.5", features = ["derive"] }
-fs2 = "0.4"
-libc = "0.2"
-rand = "0.8"
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-sha2 = "0.10"
-url = "2.5"
+anyhow = "=1.0.102"
+base64 = "=0.22.1"
+clap = { version = "=4.5.60", features = ["derive"] }
+fs2 = "=0.4.3"
+getrandom = "=0.2.17"
+libc = "=0.2.182"
+reqwest = { version = "=0.12.28", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+serde = { version = "=1.0.228", features = ["derive"] }
+serde_json = "=1.0.149"
+sha2 = "=0.10.9"
+url = "=2.5.8"
