@@ -157,7 +157,7 @@ To publish those builds to GitHub Releases:
 Workflow file:
 - `.github/workflows/desktop-artifacts.yml`
 
-The packaged Windows build bundles a native `opengateway.exe` backend and uses the WebView2 bootstrapper installer. If a default WSL environment already has both `~/.local/bin/opengateway` and `~/.factory`, the GUI prefers that WSL backend automatically; otherwise it falls back to the bundled Windows backend. That keeps the installer much smaller, but Windows may need internet access if WebView2 is not already present.
+The packaged Windows build bundles a native `opengateway.exe` backend and uses the WebView2 bootstrapper installer. Windows runs the bundled backend by default so Factory Desktop setup reads and writes Windows Factory state. WSL is only used when explicitly requested with `OPENGATEWAY_WSL_BRIDGE`, `OPENGATEWAY_WSL_DISTRO`, `OPENGATEWAY_WSL_WORKSPACE`, or a Linux-looking `OPENGATEWAY_WORKSPACE`.
 
 ## Paths
 

@@ -1,28 +1,29 @@
+#[cfg(target_os = "windows")]
+use crate::runtime_target::{
+    looks_like_linux_path, select_windows_runtime, windows_bundled_backend_preferred,
+    windows_wsl_requested, WindowsRuntimeSelection,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::env;
 #[cfg(target_os = "windows")]
 use std::ffi::OsString;
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
 use std::path::PathBuf;
 use std::process::Command;
 #[cfg(target_os = "windows")]
 use std::process::Stdio;
-use tauri::AppHandle;
-#[cfg(target_os = "windows")]
-use std::os::windows::process::CommandExt;
 #[cfg(target_os = "windows")]
 use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(target_os = "windows")]
-use std::sync::OnceLock;
-#[cfg(target_os = "windows")]
 use std::time::{Duration, Instant};
+use tauri::AppHandle;
 #[cfg(target_os = "windows")]
 use tauri_plugin_shell::ShellExt;
 
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
-#[cfg(target_os = "windows")]
-static WSL_BRIDGE_CACHE: OnceLock<WslBridge> = OnceLock::new();
 #[cfg(target_os = "windows")]
 static WSL_GATEWAY_STARTED_BY_APP: AtomicBool = AtomicBool::new(false);
 
@@ -64,8 +65,10 @@ pub async fn tail_logs(app: AppHandle, limit: Option<usize>) -> Result<Vec<Strin
 #[tauri::command]
 pub async fn start_gateway(app: AppHandle) -> Result<CommandResult, String> {
     #[cfg(target_os = "windows")]
-    if let RuntimeTarget::Wsl(bridge) = resolve_runtime_target() {
-        return start_wsl_gateway(&bridge);
+    match resolve_runtime_target() {
+        RuntimeTarget::Wsl(bridge) => return start_wsl_gateway(&bridge),
+        RuntimeTarget::Unavailable(message) => return Err(message),
+        RuntimeTarget::Bundled | RuntimeTarget::Local(_) => {}
     }
 
     run_json_command(&app, &["gui-start"]).await
@@ -123,6 +126,8 @@ where
         RuntimeTarget::Wsl(bridge) => run_wsl_command(&bridge, &args)?,
         #[cfg(target_os = "windows")]
         RuntimeTarget::Bundled => run_sidecar_command(_app, &args).await?,
+        #[cfg(target_os = "windows")]
+        RuntimeTarget::Unavailable(message) => return Err(message),
         RuntimeTarget::Local(binary) => run_local_command(&binary, &args)?,
     };
 
@@ -156,6 +161,8 @@ enum RuntimeTarget {
     Wsl(WslBridge),
     #[cfg(target_os = "windows")]
     Bundled,
+    #[cfg(target_os = "windows")]
+    Unavailable(String),
     Local(PathBuf),
 }
 
@@ -206,11 +213,26 @@ pub fn stop_managed_gateway_on_exit() {}
 fn resolve_runtime_target() -> RuntimeTarget {
     #[cfg(target_os = "windows")]
     {
-        if let Some(bridge) = resolve_wsl_bridge() {
-            return RuntimeTarget::Wsl(bridge);
-        }
-        if should_use_bundled_backend() {
-            return RuntimeTarget::Bundled;
+        let wsl_requested = wsl_bridge_requested();
+        let wsl_bridge = if wsl_requested {
+            resolve_wsl_bridge()
+        } else {
+            None
+        };
+
+        match select_windows_runtime(
+            wsl_requested,
+            wsl_bridge.is_some(),
+            should_use_bundled_backend(),
+        ) {
+            WindowsRuntimeSelection::Wsl => {
+                return RuntimeTarget::Wsl(wsl_bridge.expect("WSL bridge was selected"));
+            }
+            WindowsRuntimeSelection::UnavailableWsl => {
+                return RuntimeTarget::Unavailable(wsl_bridge_unavailable_message());
+            }
+            WindowsRuntimeSelection::Bundled => return RuntimeTarget::Bundled,
+            WindowsRuntimeSelection::Local => {}
         }
     }
 
@@ -219,29 +241,46 @@ fn resolve_runtime_target() -> RuntimeTarget {
 
 #[cfg(target_os = "windows")]
 fn should_use_bundled_backend() -> bool {
-    !cfg!(debug_assertions) && env_nonempty("OPENGATEWAY_BIN").is_none()
+    windows_bundled_backend_preferred(
+        cfg!(debug_assertions),
+        env_nonempty("OPENGATEWAY_BIN").is_some(),
+    )
 }
 
 #[cfg(target_os = "windows")]
 fn resolve_wsl_bridge() -> Option<WslBridge> {
+    if !wsl_bridge_requested() {
+        return None;
+    }
+
+    let distro = env_nonempty("OPENGATEWAY_WSL_DISTRO");
+    let wsl_workspace = env_nonempty("OPENGATEWAY_WSL_WORKSPACE");
+    let workspace = env_nonempty("OPENGATEWAY_WORKSPACE");
+
+    let workspace =
+        wsl_workspace.or_else(|| workspace.filter(|value| looks_like_linux_path(value)));
+    let distro = distro.or_else(detect_default_wsl_distro)?;
+    probe_wsl_bridge(&distro, workspace)
+}
+
+#[cfg(target_os = "windows")]
+fn wsl_bridge_requested() -> bool {
     let bridge_forced = env_flag("OPENGATEWAY_WSL_BRIDGE");
     let distro = env_nonempty("OPENGATEWAY_WSL_DISTRO");
-    let workspace = env_nonempty("OPENGATEWAY_WSL_WORKSPACE").or_else(|| {
-        env_nonempty("OPENGATEWAY_WORKSPACE").filter(|value| looks_like_linux_path(value))
-    });
+    let wsl_workspace = env_nonempty("OPENGATEWAY_WSL_WORKSPACE");
+    let workspace = env_nonempty("OPENGATEWAY_WORKSPACE");
 
-    if bridge_forced || distro.is_some() || workspace.is_some() {
-        let distro = distro.or_else(detect_default_wsl_distro)?;
-        return probe_wsl_bridge(&distro, workspace);
-    }
+    windows_wsl_requested(
+        bridge_forced,
+        distro.is_some(),
+        wsl_workspace.is_some(),
+        workspace.as_deref(),
+    )
+}
 
-    if let Some(cached) = WSL_BRIDGE_CACHE.get() {
-        return Some(cached.clone());
-    }
-
-    let detected = detect_default_wsl_bridge().or_else(detect_any_wsl_bridge)?;
-    let _ = WSL_BRIDGE_CACHE.set(detected.clone());
-    Some(detected)
+#[cfg(target_os = "windows")]
+fn wsl_bridge_unavailable_message() -> String {
+    "WSL backend was requested, but OpenGateway could not resolve a usable WSL bridge. Check OPENGATEWAY_WSL_DISTRO, OPENGATEWAY_WSL_WORKSPACE, WSL installation, and the OpenGateway/Factory setup inside WSL.".to_string()
 }
 
 #[cfg(target_os = "windows")]
@@ -275,32 +314,6 @@ fn run_local_command(binary: &PathBuf, args: &[String]) -> Result<RawOutput, Str
         stdout: output.stdout,
         stderr: output.stderr,
     })
-}
-
-#[cfg(target_os = "windows")]
-fn detect_default_wsl_bridge() -> Option<WslBridge> {
-    let distro = detect_default_wsl_distro()?;
-    probe_wsl_bridge(&distro, None)
-}
-
-#[cfg(target_os = "windows")]
-fn detect_any_wsl_bridge() -> Option<WslBridge> {
-    let mut command = windows_system_command("wsl.exe");
-    hide_windows_command(&mut command);
-    let output = command.arg("--list").arg("--quiet").output().ok()?;
-    if !output.status.success() {
-        return None;
-    }
-
-    let stdout = decode_wsl_output(&output.stdout)?;
-    for distro in stdout.lines().map(str::trim).filter(|line| !line.is_empty()) {
-        let Some(bridge) = probe_wsl_bridge(distro, None) else {
-            continue;
-        };
-        return Some(bridge);
-    }
-
-    None
 }
 
 #[cfg(target_os = "windows")]
@@ -441,11 +454,6 @@ fn env_flag(name: &str) -> bool {
             .map(|value| value.to_ascii_lowercase()),
         Some(value) if matches!(value.as_str(), "1" | "true" | "yes" | "on")
     )
-}
-
-#[cfg(target_os = "windows")]
-fn looks_like_linux_path(value: &str) -> bool {
-    value.starts_with('/') || value.starts_with("~/")
 }
 
 #[cfg(target_os = "windows")]
@@ -628,7 +636,11 @@ exec "$binary" run >>"$log_file" 2>&1"#,
 
     let logs = run_wsl_json_command::<Vec<String>>(
         bridge,
-        &["gui-logs".to_string(), "--limit".to_string(), "20".to_string()],
+        &[
+            "gui-logs".to_string(),
+            "--limit".to_string(),
+            "20".to_string(),
+        ],
     )
     .unwrap_or_default()
     .join("\n");

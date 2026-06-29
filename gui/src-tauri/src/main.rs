@@ -4,6 +4,7 @@
 )]
 
 mod control;
+mod runtime_target;
 
 fn main() {
     let builder = tauri::Builder::default();
