@@ -60,6 +60,7 @@ pub struct AuthSnapshot {
     active_account: Option<String>,
     expires_at_ms: Option<i64>,
     expires_in_minutes: Option<i64>,
+    issue: Option<&'static str>,
 }
 
 #[derive(Debug, Serialize)]
@@ -333,7 +334,18 @@ fn read_auth_snapshot(path: &Path) -> AuthSnapshot {
         active_account,
         expires_at_ms,
         expires_in_minutes,
+        issue: auth_issue(account_count, expires_in_minutes),
     }
+}
+
+fn auth_issue(account_count: usize, expires_in_minutes: Option<i64>) -> Option<&'static str> {
+    if account_count == 0 {
+        return Some("Codex sign-in is required.");
+    }
+    if matches!(expires_in_minutes, Some(0)) {
+        return Some("Codex sign-in has expired.");
+    }
+    None
 }
 
 fn read_factory_snapshot(factory_paths: &crate::paths::FactoryPaths) -> FactorySnapshot {
@@ -719,6 +731,21 @@ mod tests {
         );
 
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn auth_issue_requires_account_when_missing() {
+        assert_eq!(auth_issue(0, None), Some("Codex sign-in is required."));
+    }
+
+    #[test]
+    fn auth_issue_flags_expired_account() {
+        assert_eq!(auth_issue(1, Some(0)), Some("Codex sign-in has expired."));
+    }
+
+    #[test]
+    fn auth_issue_allows_valid_account() {
+        assert_eq!(auth_issue(1, Some(1440)), None);
     }
 
     fn temp_gateway_dir(name: &str) -> PathBuf {

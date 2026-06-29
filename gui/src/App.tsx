@@ -927,15 +927,23 @@ function App() {
                   <p className="eyebrow">Auth Signal</p>
                   <HelpTip
                     label="Auth Signal"
-                    text="Shows which OpenAI account is active and how long the current auth is expected to stay valid."
+                    text="Shows whether Codex sign-in is ready and how long the current auth is expected to stay valid."
                     placement="bottom"
                   />
                 </div>
-                <h3>
-                  <SensitiveValue
-                    value={snapshot?.gateway.auth.activeAccount}
-                    keep={16}
-                  />
+                <h3
+                  className={
+                    snapshot?.gateway.auth.issue ? "status-board__issue" : ""
+                  }
+                >
+                  {snapshot?.gateway.auth.issue ? (
+                    snapshot.gateway.auth.issue
+                  ) : (
+                    <SensitiveValue
+                      value={snapshot?.gateway.auth.activeAccount}
+                      keep={16}
+                    />
+                  )}
                 </h3>
                 <dl className="mini-facts">
                   <div>

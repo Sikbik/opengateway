@@ -875,6 +875,10 @@ pre {
   overflow-wrap: anywhere;
 }
 
+.status-board__issue {
+  color: var(--warning);
+}
+
 .mini-facts {
   margin: 0;
   display: grid;

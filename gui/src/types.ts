@@ -34,6 +34,7 @@ export interface AuthSnapshot {
   activeAccount: string | null;
   expiresAtMs: number | null;
   expiresInMinutes: number | null;
+  issue: string | null;
 }
 
 export interface FactorySnapshot {
