@@ -407,7 +407,7 @@ function App() {
       if (!bulkModel) {
         setBulkModel(
           nextSnapshot.models.find(
-            (option) => option.model === "custom:gpt-5.4(xhigh)",
+            (option) => option.displayName === "GPT-5.4 (XHigh)",
           )?.model ??
             nextSnapshot.models[0]?.model ??
             "inherit",

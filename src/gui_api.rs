@@ -397,21 +397,26 @@ fn read_model_catalog() -> Vec<ModelOption> {
         .map(|items| {
             items
                 .iter()
-                .filter_map(|item| {
-                    let raw_model = item.get("model")?.as_str()?.to_string();
-                    Some(ModelOption {
-                        display_name: item.get("displayName")?.as_str()?.to_string(),
-                        model: format!("custom:{raw_model}"),
-                        id: item.get("id").and_then(Value::as_str).map(str::to_string),
-                        source: "factory-settings".to_string(),
-                    })
-                })
+                .filter_map(model_option_from_factory_settings_item)
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
 
     models.sort_by(|left, right| left.display_name.cmp(&right.display_name));
     models
+}
+
+fn model_option_from_factory_settings_item(item: &Value) -> Option<ModelOption> {
+    let raw_model = item.get("model")?.as_str()?.to_string();
+    let factory_model_id = item.get("id").and_then(Value::as_str).map(str::to_string);
+    Some(ModelOption {
+        display_name: item.get("displayName")?.as_str()?.to_string(),
+        model: factory_model_id
+            .clone()
+            .unwrap_or_else(|| format!("custom:{raw_model}")),
+        id: factory_model_id,
+        source: "factory-settings".to_string(),
+    })
 }
 
 fn read_json_file(path: &Path) -> Value {
@@ -614,5 +619,20 @@ mod tests {
 
         assert_eq!(snapshot.mode_recommendation, "setup-required");
         assert!(!snapshot.byok_required);
+    }
+
+    #[test]
+    fn model_catalog_uses_factory_custom_model_id() {
+        let item = serde_json::json!({
+            "model": "gpt-5.4(xhigh)",
+            "id": "custom:GPT-5.4-(XHigh)-24",
+            "displayName": "GPT-5.4 (XHigh)"
+        });
+
+        let option = model_option_from_factory_settings_item(&item).unwrap();
+
+        assert_eq!(option.model, "custom:GPT-5.4-(XHigh)-24");
+        assert_eq!(option.id.as_deref(), Some("custom:GPT-5.4-(XHigh)-24"));
+        assert_eq!(option.display_name, "GPT-5.4 (XHigh)");
     }
 }
