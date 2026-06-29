@@ -252,9 +252,7 @@ fn read_gateway_snapshot(
         log_path: paths.log_file.display().to_string(),
         preferred_model: factory.session_default_model.clone(),
         auth: read_auth_snapshot(&paths.auth_dir.join("auth.json")),
-        last_log_line: crate::tail_file(&paths.log_file, 1)
-            .ok()
-            .and_then(|mut items| items.pop()),
+        last_log_line: last_gateway_log_line(&paths.log_file),
     }
 }
 
@@ -276,6 +274,23 @@ fn gateway_health(http_ready: bool, port_ready: bool, pid: Option<u32>) -> &'sta
         (false, false, true) => "degraded",
         (false, false, false) => "offline",
     }
+}
+
+fn last_gateway_log_line(log_file: &Path) -> Option<String> {
+    crate::tail_file(log_file, 80)
+        .ok()?
+        .into_iter()
+        .rev()
+        .find(|line| is_gateway_log_entry(line))
+}
+
+fn is_gateway_log_entry(line: &str) -> bool {
+    let bytes = line.as_bytes();
+    bytes.len() > 15
+        && bytes[0] == b'['
+        && bytes[14] == b']'
+        && bytes[15] == b' '
+        && bytes[1..14].iter().all(u8::is_ascii_digit)
 }
 
 fn read_auth_snapshot(path: &Path) -> AuthSnapshot {
@@ -686,6 +701,24 @@ mod tests {
     fn gateway_health_marks_live_pid_without_port_as_degraded() {
         assert_eq!(gateway_health(false, false, Some(123)), "degraded");
         assert_eq!(gateway_health(false, false, None), "offline");
+    }
+
+    #[test]
+    fn last_gateway_log_line_ignores_multiline_error_body() {
+        let dir = temp_gateway_dir("multiline-log");
+        let log_file = dir.join("opengateway.log");
+        fs::write(
+            &log_file,
+            "[1782696121887] upstream proxy error: failed to refresh access token\n{\n  \"error\": {}\n}\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            last_gateway_log_line(&log_file).as_deref(),
+            Some("[1782696121887] upstream proxy error: failed to refresh access token")
+        );
+
+        fs::remove_dir_all(dir).unwrap();
     }
 
     fn temp_gateway_dir(name: &str) -> PathBuf {
