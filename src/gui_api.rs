@@ -239,15 +239,10 @@ fn read_gateway_snapshot(
     paths: &crate::paths::AppPaths,
     factory: &FactorySnapshot,
 ) -> GatewaySnapshot {
-    let pid = crate::read_pid(&paths.pid_file).map(|value| value as u32);
+    let pid = read_live_gateway_pid(&paths.pid_file);
     let http_ready = crate::is_http_ready("127.0.0.1", 42069, Duration::from_millis(500));
     let port_ready = crate::is_port_open("127.0.0.1", 42069, Duration::from_millis(300));
-    let health = match (http_ready, port_ready, pid.is_some()) {
-        (true, _, true) => "online",
-        (true, _, false) => "degraded",
-        (false, true, _) => "degraded",
-        (false, false, _) => "offline",
-    };
+    let health = gateway_health(http_ready, port_ready, pid);
 
     GatewaySnapshot {
         running: health != "offline",
@@ -260,6 +255,26 @@ fn read_gateway_snapshot(
         last_log_line: crate::tail_file(&paths.log_file, 1)
             .ok()
             .and_then(|mut items| items.pop()),
+    }
+}
+
+fn read_live_gateway_pid(pid_file: &Path) -> Option<u32> {
+    let pid = crate::read_pid(pid_file)?;
+    if crate::pid_running(pid) {
+        Some(pid as u32)
+    } else {
+        crate::remove_pid(pid_file);
+        None
+    }
+}
+
+fn gateway_health(http_ready: bool, port_ready: bool, pid: Option<u32>) -> &'static str {
+    match (http_ready, port_ready, pid.is_some()) {
+        (true, _, true) => "online",
+        (true, _, false) => "degraded",
+        (false, true, _) => "degraded",
+        (false, false, true) => "degraded",
+        (false, false, false) => "offline",
     }
 }
 
@@ -642,5 +657,44 @@ mod tests {
         assert_eq!(option.model, "custom:GPT-5.4-(XHigh)-24");
         assert_eq!(option.id.as_deref(), Some("custom:GPT-5.4-(XHigh)-24"));
         assert_eq!(option.display_name, "GPT-5.4 (XHigh)");
+    }
+
+    #[test]
+    fn stale_gateway_pid_is_removed_from_snapshot_state() {
+        let dir = temp_gateway_dir("stale-pid");
+        let pid_file = dir.join("opengateway.pid");
+        fs::write(&pid_file, "-1\n").unwrap();
+
+        assert_eq!(read_live_gateway_pid(&pid_file), None);
+        assert!(!pid_file.exists());
+
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn live_gateway_pid_is_reported_in_snapshot_state() {
+        let dir = temp_gateway_dir("live-pid");
+        let pid_file = dir.join("opengateway.pid");
+        fs::write(&pid_file, format!("{}\n", std::process::id())).unwrap();
+
+        assert_eq!(read_live_gateway_pid(&pid_file), Some(std::process::id()));
+
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn gateway_health_marks_live_pid_without_port_as_degraded() {
+        assert_eq!(gateway_health(false, false, Some(123)), "degraded");
+        assert_eq!(gateway_health(false, false, None), "offline");
+    }
+
+    fn temp_gateway_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "opengateway-gui-api-{name}-{}-{}",
+            std::process::id(),
+            now_millis()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        dir
     }
 }
