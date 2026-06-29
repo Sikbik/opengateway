@@ -1,5 +1,6 @@
 use anyhow::{anyhow, Context, Result};
 use serde::Serialize;
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -43,6 +44,25 @@ pub(crate) fn read_droids(dir: &Path, scope: &'static str) -> Vec<DroidRecord> {
         }
     }
     droids
+}
+
+pub(crate) fn flag_unavailable_custom_models(
+    droids: &mut [DroidRecord],
+    installed_model_ids: &HashSet<String>,
+) {
+    const ISSUE: &str = "Custom model is not configured in Factory settings.";
+
+    for droid in droids {
+        let Some(model) = droid.model.as_deref() else {
+            continue;
+        };
+        if !model.starts_with("custom:") || installed_model_ids.contains(model) {
+            continue;
+        }
+        if !droid.issues.iter().any(|issue| issue == ISSUE) {
+            droid.issues.push(ISSUE.to_string());
+        }
+    }
 }
 
 pub(crate) fn set_droid_model(
@@ -271,5 +291,25 @@ mod tests {
         assert!(error
             .to_string()
             .contains("refusing to edit a file outside the allowed droid directories"));
+    }
+
+    #[test]
+    fn flags_custom_droid_model_missing_from_factory_settings() {
+        let temp = TestDir::new();
+        let path = temp.path().join("worker.md");
+        fs::write(
+            &path,
+            "---\nname: Worker\nmodel: custom:gpt-5.4(xhigh)\n---\nRun the task.\n",
+        )
+        .unwrap();
+        let mut records = vec![parse_droid_file(&path, "machine").unwrap()];
+        let installed_models = HashSet::from(["custom:GPT-5.4-(XHigh)-4".to_string()]);
+
+        flag_unavailable_custom_models(&mut records, &installed_models);
+
+        assert_eq!(
+            records[0].issues,
+            vec!["Custom model is not configured in Factory settings."]
+        );
     }
 }

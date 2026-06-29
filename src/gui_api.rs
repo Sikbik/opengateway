@@ -1,6 +1,7 @@
 use anyhow::{anyhow, Context, Result};
 use serde::Serialize;
 use serde_json::Value;
+use std::collections::HashSet;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -8,8 +9,8 @@ use std::process::Command;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::droid_files::{
-    merge_droids, read_droids, set_droid_model as set_droid_record_model, DroidRecord,
-    WORKSPACE_DROIDS_RELATIVE,
+    flag_unavailable_custom_models, merge_droids, read_droids,
+    set_droid_model as set_droid_record_model, DroidRecord, WORKSPACE_DROIDS_RELATIVE,
 };
 use crate::factory_desktop::FactoryDesktopReadiness;
 use crate::paths::{build_factory_paths, build_paths};
@@ -163,6 +164,13 @@ fn load_snapshot() -> Result<AppSnapshot> {
         .as_ref()
         .map(|path| read_droids(&path.join(WORKSPACE_DROIDS_RELATIVE), "workspace"))
         .unwrap_or_default();
+    let models = read_model_catalog();
+    let installed_model_ids = models
+        .iter()
+        .map(|model| model.model.clone())
+        .collect::<HashSet<_>>();
+    let mut droids = merge_droids(workspace_droids, machine_droids);
+    flag_unavailable_custom_models(&mut droids, &installed_model_ids);
 
     let factory = read_factory_snapshot(&factory_paths);
     let factory_desktop = crate::factory_desktop::probe_factory_desktop();
@@ -181,8 +189,8 @@ fn load_snapshot() -> Result<AppSnapshot> {
         gateway: read_gateway_snapshot(&paths, &factory),
         factory,
         native_harness,
-        models: read_model_catalog(),
-        droids: merge_droids(workspace_droids, machine_droids),
+        models,
+        droids,
     })
 }
 
