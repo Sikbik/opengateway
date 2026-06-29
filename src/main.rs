@@ -510,7 +510,7 @@ fn build_control_launcher_command(workspace: &Path, mode: ControlModeArg) -> Res
             .arg("/C")
             .arg(launcher)
             .arg(mode);
-        return Ok(command);
+        Ok(command)
     }
 
     #[cfg(not(windows))]
@@ -890,7 +890,7 @@ fn resolve_background_executable(paths: &AppPaths) -> Result<PathBuf> {
                 )
             })?;
         }
-        return Ok(runtime_executable);
+        Ok(runtime_executable)
     }
 
     #[cfg(not(windows))]
@@ -1588,12 +1588,12 @@ fn pid_running(pid: i32) -> bool {
             .stderr(Stdio::null())
             .output();
 
-        return output
+        output
             .ok()
             .filter(|result| result.status.success())
             .and_then(|result| String::from_utf8(result.stdout).ok())
             .map(|stdout| stdout.trim_start().starts_with('"'))
-            .unwrap_or(false);
+            .unwrap_or(false)
     }
 
     #[cfg(not(windows))]
@@ -1627,11 +1627,11 @@ fn send_signal(pid: i32, signal: &str) -> Result<()> {
             .status()
             .with_context(|| format!("failed to execute taskkill for pid {pid}"))?;
 
-        return if status.success() {
+        if status.success() {
             Ok(())
         } else {
             Err(anyhow!("taskkill {} {} failed", signal, pid))
-        };
+        }
     }
 
     #[cfg(not(windows))]
