@@ -91,6 +91,11 @@ pub async fn run_doctor(app: AppHandle) -> Result<CommandResult, String> {
 }
 
 #[tauri::command]
+pub async fn run_login(app: AppHandle) -> Result<CommandResult, String> {
+    run_json_command(&app, &["gui-login"]).await
+}
+
+#[tauri::command]
 pub async fn probe_generation(app: AppHandle) -> Result<CommandResult, String> {
     run_json_command(&app, &["gui-probe-generation"]).await
 }

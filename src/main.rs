@@ -88,6 +88,8 @@ enum Commands {
     GuiStop,
     #[command(name = "gui-doctor", hide = true)]
     GuiDoctor,
+    #[command(name = "gui-login", hide = true)]
+    GuiLogin,
     #[command(name = "gui-probe-generation", hide = true)]
     GuiProbeGeneration,
     #[command(name = "gui-sync-factory", hide = true)]
@@ -445,6 +447,7 @@ fn run_cli() -> Result<()> {
         Commands::GuiStart => gui_api::print_command_result_json(&["start"]),
         Commands::GuiStop => gui_api::print_command_result_json(&["stop"]),
         Commands::GuiDoctor => gui_api::print_command_result_json(&["doctor"]),
+        Commands::GuiLogin => gui_api::print_login_json(),
         Commands::GuiProbeGeneration => gui_api::print_command_result_json(&["probe-generation"]),
         Commands::GuiSyncFactory => gui_api::print_command_result_json(&["sync-factory"]),
         Commands::GuiSetDroidModel(args) => {

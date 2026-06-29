@@ -139,6 +139,10 @@ pub fn print_command_result_json(command: &[&str]) -> Result<()> {
     Ok(())
 }
 
+pub fn print_login_json() -> Result<()> {
+    print_command_result_json(&gui_login_command_args())
+}
+
 pub fn print_droid_model_update_json(path: &Path, model: &str) -> Result<()> {
     let factory_paths = build_factory_paths()?;
     let workspace_droids_dir =
@@ -346,6 +350,10 @@ fn auth_issue(account_count: usize, expires_in_minutes: Option<i64>) -> Option<&
         return Some("Codex sign-in has expired.");
     }
     None
+}
+
+fn gui_login_command_args() -> Vec<&'static str> {
+    vec!["login", "browser", "--open-browser"]
 }
 
 fn read_factory_snapshot(factory_paths: &crate::paths::FactoryPaths) -> FactorySnapshot {
@@ -746,6 +754,14 @@ mod tests {
     #[test]
     fn auth_issue_allows_valid_account() {
         assert_eq!(auth_issue(1, Some(1440)), None);
+    }
+
+    #[test]
+    fn gui_login_command_opens_browser() {
+        assert_eq!(
+            gui_login_command_args(),
+            vec!["login", "browser", "--open-browser"]
+        );
     }
 
     fn temp_gateway_dir(name: &str) -> PathBuf {

@@ -352,6 +352,7 @@ function App() {
   const [logs, setLogs] = useState<string[]>([]);
   const [doctorOutput, setDoctorOutput] = useState("");
   const [generationOutput, setGenerationOutput] = useState("");
+  const [authOutput, setAuthOutput] = useState("");
   const [factorySyncOutput, setFactorySyncOutput] = useState("");
   const [activeTab, setActiveTab] = useState<TabKey>("dashboard");
   const [selectedModels, setSelectedModels] = useState<Record<string, string>>(
@@ -473,6 +474,14 @@ function App() {
       "doctor",
       () => call<CommandResult>("run_doctor"),
       (result) => setDoctorOutput((result as CommandResult).output.trim()),
+    );
+  }
+
+  async function handleLogin() {
+    await runAction(
+      "login",
+      () => call<CommandResult>("run_login"),
+      (result) => setAuthOutput((result as CommandResult).output.trim()),
     );
   }
 
@@ -959,6 +968,22 @@ function App() {
                     </dd>
                   </div>
                 </dl>
+                {mode === "desktop" ? (
+                  <button
+                    className="button button--utility status-board__action"
+                    onClick={() => void handleLogin()}
+                    disabled={busyAction !== null}
+                  >
+                    {busyAction === "login"
+                      ? "Signing in..."
+                      : snapshot?.gateway.auth.issue
+                        ? "Sign in"
+                        : "Refresh sign-in"}
+                  </button>
+                ) : null}
+                {authOutput ? (
+                  <p className="status-board__note">{authOutput}</p>
+                ) : null}
               </div>
 
               <div className="status-board__lane">

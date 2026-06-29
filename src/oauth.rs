@@ -9,7 +9,7 @@ use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::process::Command;
+use std::process::{Command, ExitStatus};
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -424,26 +424,29 @@ fn open_browser(url: &str) -> Result<()> {
             } else {
                 process.arg(url);
             }
-            if process.status().is_ok() {
+            if browser_launcher_succeeded(process.status()) {
                 return Ok(());
             }
         }
     }
 
-    if cfg!(target_os = "macos") && Command::new("open").arg(url).status().is_ok() {
+    if cfg!(target_os = "macos")
+        && browser_launcher_succeeded(Command::new("open").arg(url).status())
+    {
         return Ok(());
     }
 
     if cfg!(target_os = "windows")
-        && Command::new("cmd")
-            .args(["/C", "start", "", url])
-            .status()
-            .is_ok()
+        && browser_launcher_succeeded(Command::new("cmd").args(["/C", "start", "", url]).status())
     {
         return Ok(());
     }
 
     bail!("no supported browser launcher found")
+}
+
+fn browser_launcher_succeeded(status: std::io::Result<ExitStatus>) -> bool {
+    status.map(|value| value.success()).unwrap_or(false)
 }
 
 fn extract_account_id_from_jwt(token: &str) -> Option<String> {
@@ -546,5 +549,18 @@ mod tests {
     fn parse_poll_interval_has_safety_margin() {
         assert_eq!(parse_poll_interval(Some("5")), Duration::from_secs(8));
         assert_eq!(parse_poll_interval(Some("0")), Duration::from_secs(4));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn browser_launcher_requires_successful_exit_status() {
+        use std::os::unix::process::ExitStatusExt;
+
+        assert!(browser_launcher_succeeded(Ok(
+            std::process::ExitStatus::from_raw(0)
+        )));
+        assert!(!browser_launcher_succeeded(Ok(
+            std::process::ExitStatus::from_raw(1)
+        )));
     }
 }
