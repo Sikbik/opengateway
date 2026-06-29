@@ -14,6 +14,9 @@ const MAX_HEADER_BYTES: usize = 64 * 1024;
 const REFRESH_SKEW_MS: i64 = 5 * 60 * 1000;
 const UPSTREAM_RESPONSES_ENDPOINT: &str = "https://chatgpt.com/backend-api/codex/responses";
 const DEFAULT_INSTRUCTIONS: &str = "You are a helpful assistant.";
+const GPT_5_5_MODEL: &str = "gpt-5.5";
+const GPT_5_5_FAST_MODEL: &str = "gpt-5.5-fast";
+const PRIORITY_SERVICE_TIER: &str = "priority";
 const RETRY_AFTER_SECONDS: u64 = 1;
 const RATE_LIMITER_ENTRY_TTL: Duration = Duration::from_secs(15 * 60);
 const RATE_LIMITER_CLEANUP_INTERVAL: Duration = Duration::from_secs(60);
@@ -900,6 +903,7 @@ fn strip_unsupported_fields(payload_object: &mut serde_json::Map<String, Value>)
                 | "tool_choice"
                 | "reasoning"
                 | "parallel_tool_calls"
+                | "service_tier"
                 | "text"
                 | "include"
                 | "stream"
@@ -986,11 +990,17 @@ fn normalize_model_alias_and_reasoning(payload_object: &mut serde_json::Map<Stri
         return;
     };
 
-    let Some((canonical_model, effort)) = normalize_requested_model(model_id) else {
+    let Some((canonical_model, effort, service_tier)) = normalize_requested_model(model_id) else {
         return;
     };
 
     payload_object.insert("model".to_string(), Value::String(canonical_model));
+    if let Some(service_tier) = service_tier {
+        payload_object.insert(
+            "service_tier".to_string(),
+            Value::String(service_tier.to_string()),
+        );
+    }
 
     if let Some(effort) = effort {
         match payload_object.get_mut("reasoning") {
@@ -1360,16 +1370,31 @@ fn parse_model_effort_alias(model_id: &str) -> Option<(String, String)> {
     None
 }
 
-fn normalize_requested_model(model_id: &str) -> Option<(String, Option<String>)> {
-    if let Some(factory_model) = parse_factory_custom_model_id(model_id) {
-        return Some(
-            parse_model_effort_alias(&factory_model)
-                .map(|(model, effort)| (model, Some(effort)))
-                .unwrap_or((factory_model, None)),
-        );
+fn normalize_requested_model(
+    model_id: &str,
+) -> Option<(String, Option<String>, Option<&'static str>)> {
+    let requested_model =
+        parse_factory_custom_model_id(model_id).unwrap_or_else(|| model_id.to_string());
+
+    if let Some((model, effort)) = parse_model_effort_alias(&requested_model) {
+        let (model, service_tier) = normalize_fast_model(&model)
+            .map(|(model, service_tier)| (model.to_string(), Some(service_tier)))
+            .unwrap_or((model, None));
+        return Some((model, Some(effort), service_tier));
     }
 
-    parse_model_effort_alias(model_id).map(|(model, effort)| (model, Some(effort)))
+    if let Some((model, service_tier)) = normalize_fast_model(&requested_model) {
+        return Some((model.to_string(), None, Some(service_tier)));
+    }
+
+    parse_factory_custom_model_id(model_id).map(|model| (model, None, None))
+}
+
+fn normalize_fast_model(model_id: &str) -> Option<(&'static str, &'static str)> {
+    match model_id {
+        GPT_5_5_FAST_MODEL => Some((GPT_5_5_MODEL, PRIORITY_SERVICE_TIER)),
+        _ => None,
+    }
 }
 
 fn parse_factory_custom_model_id(model_id: &str) -> Option<String> {
@@ -1619,6 +1644,24 @@ mod tests {
             Some("gpt-5.4")
         );
         assert!(payload.get("reasoning").is_none());
+    }
+
+    #[test]
+    fn normalizes_gpt_5_5_fast_to_priority_service_tier() {
+        let body = serde_json::to_vec(&json!({"model":"gpt-5.5-fast", "input": "hi"}))
+            .expect("body serialization should succeed");
+        let normalized = normalize_model_alias_in_request_body(body);
+        let payload: Value =
+            serde_json::from_slice(&normalized).expect("normalized payload must be valid json");
+
+        assert_eq!(
+            payload.get("model").and_then(Value::as_str),
+            Some("gpt-5.5")
+        );
+        assert_eq!(
+            payload.get("service_tier").and_then(Value::as_str),
+            Some("priority")
+        );
     }
 
     #[test]

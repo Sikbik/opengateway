@@ -8,7 +8,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 const FACTORY_PREFERRED_MODEL: &str = "gpt-5.5";
 const FACTORY_PREFERRED_REASONING_EFFORT: &str = "xhigh";
 const FACTORY_DEFAULT_MAX_OUTPUT_TOKENS: u64 = 16_384;
-const DEFAULT_OPENAI_MODEL_CATALOG: [(&str, &str); 13] = [
+const DEFAULT_OPENAI_MODEL_CATALOG: [(&str, &str); 14] = [
     ("gpt-5.4", "GPT-5.4"),
     ("gpt-5.3-codex", "GPT-5.3 Codex"),
     ("gpt-5.3-codex-spark", "GPT-5.3 Codex Spark"),
@@ -22,6 +22,7 @@ const DEFAULT_OPENAI_MODEL_CATALOG: [(&str, &str); 13] = [
     ("gpt-5.1", "GPT-5.1"),
     ("gpt-5", "GPT-5"),
     ("gpt-5.5", "GPT-5.5"),
+    ("gpt-5.5-fast", "GPT-5.5 Fast"),
 ];
 const DEPRECATED_REASONING_ALIAS_MODEL_IDS: [&str; 14] = [
     "gpt-5.4(low)",
@@ -514,6 +515,7 @@ fn factory_settings_model_index(model_id: &str, fallback_index: usize) -> usize 
         "gpt-5" => 24,
         "gpt-5(high)" => 25,
         "gpt-5.5" => 26,
+        "gpt-5.5-fast" => 27,
         _ => fallback_index,
     }
 }
@@ -678,6 +680,14 @@ mod tests {
     }
 
     #[test]
+    fn default_catalog_includes_gpt_5_5_fast_selectable_model() {
+        let models = resolve_model_ids("");
+
+        assert!(models.contains(&"gpt-5.5-fast".to_string()));
+        assert_eq!(model_display_name("gpt-5.5-fast"), "GPT-5.5 Fast");
+    }
+
+    #[test]
     fn default_catalog_uses_factory_reasoning_selector_instead_of_model_aliases() {
         let models = resolve_model_ids("");
 
@@ -702,6 +712,10 @@ mod tests {
         assert_eq!(
             factory_model_id_for_model(&settings, "gpt-5.5").as_deref(),
             Some("custom:GPT-5.5-26")
+        );
+        assert_eq!(
+            factory_model_id_for_model(&settings, "gpt-5.5-fast").as_deref(),
+            Some("custom:GPT-5.5-Fast-27")
         );
     }
 

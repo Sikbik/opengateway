@@ -91,7 +91,9 @@ opengateway probe-droid
 
 `probe-generation` verifies the OpenAI-compatible gateway path. `probe-droid` verifies Factory's bundled Droid CLI can call the gateway and write a Factory session for the current workspace.
 
-Fast mode is not exposed as a custom `gpt-5.5-fast` model unless that backend model is verified as supported for the active ChatGPT/Codex account path.
+OpenGateway exposes `GPT-5.5 Fast` as a selectable custom model. It routes to the ChatGPT/Codex account backend as `gpt-5.5` with `service_tier: "priority"` because the backend does not accept literal `gpt-5.5-fast` model requests.
+
+Factory's `/fast` slash command only toggles Factory built-in model IDs, not BYOK custom models. To use fast mode through OpenGateway, select `GPT-5.5 Fast` in Factory's model picker or pass that custom model to the Droid CLI.
 
 Repo droids and machine droids are separate:
 - repo droids: `<workspace>/.factory/droids`
