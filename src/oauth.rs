@@ -437,7 +437,11 @@ fn open_browser(url: &str) -> Result<()> {
     }
 
     if cfg!(target_os = "windows")
-        && browser_launcher_succeeded(Command::new("cmd").args(["/C", "start", "", url]).status())
+        && browser_launcher_succeeded(
+            Command::new("rundll32")
+                .args(["url.dll,FileProtocolHandler", url])
+                .status(),
+        )
     {
         return Ok(());
     }
