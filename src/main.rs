@@ -417,11 +417,17 @@ fn main() {
 }
 
 pub(crate) fn runtime_log_info(message: impl AsRef<str>) {
-    println!("[{}] {}", runtime_log_timestamp_ms(), message.as_ref());
+    let line = format!("[{}] {}", runtime_log_timestamp_ms(), message.as_ref());
+    #[cfg(windows)]
+    append_runtime_log_line(&line);
+    println!("{line}");
 }
 
 pub(crate) fn runtime_log_error(message: impl AsRef<str>) {
-    eprintln!("[{}] {}", runtime_log_timestamp_ms(), message.as_ref());
+    let line = format!("[{}] {}", runtime_log_timestamp_ms(), message.as_ref());
+    #[cfg(windows)]
+    append_runtime_log_line(&line);
+    eprintln!("{line}");
 }
 
 fn runtime_log_timestamp_ms() -> u128 {
@@ -429,6 +435,23 @@ fn runtime_log_timestamp_ms() -> u128 {
         .duration_since(UNIX_EPOCH)
         .map(|value| value.as_millis())
         .unwrap_or(0)
+}
+
+#[cfg(windows)]
+fn append_runtime_log_line(line: &str) {
+    let Ok(paths) = build_paths() else {
+        return;
+    };
+    if let Some(parent) = paths.log_file.parent() {
+        fs::create_dir_all(parent).ok();
+    }
+    if let Ok(mut file) = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&paths.log_file)
+    {
+        writeln!(file, "{line}").ok();
+    }
 }
 
 fn run_cli() -> Result<()> {
