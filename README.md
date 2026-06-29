@@ -64,6 +64,8 @@ opengateway status
 opengateway logs -f
 opengateway doctor
 opengateway self-test
+opengateway probe-generation
+opengateway probe-droid
 opengateway login
 opengateway login headless
 opengateway show-key
@@ -72,9 +74,24 @@ opengateway sync-factory
 
 ## Factory Droid
 
-1. Restart `droid` if it is already running.
-2. Open the Factory model picker.
-3. Select one of the custom `GPT-*` entries added by `opengateway setup`.
+`opengateway setup` and `opengateway sync-factory` configure Factory Desktop for the local gateway. The preferred default is `GPT-5.5` with `Extra High` reasoning.
+
+1. Run `opengateway setup`, or `opengateway sync-factory` if auth is already set up.
+2. Restart Factory Desktop or start a new Factory session.
+3. In the Factory model picker, select the custom `GPT-5.5` entry if the active session did not pick it automatically.
+
+Factory stores model selection on existing sessions. If an older session keeps answering as a previous model, start a new session after running `opengateway sync-factory`.
+
+Use the probes to verify the bridge from the command line:
+
+```bash
+opengateway probe-generation
+opengateway probe-droid
+```
+
+`probe-generation` verifies the OpenAI-compatible gateway path. `probe-droid` verifies Factory's bundled Droid CLI can call the gateway and write a Factory session for the current workspace.
+
+Fast mode is not exposed as a custom `gpt-5.5-fast` model unless that backend model is verified as supported for the active ChatGPT/Codex account path.
 
 Repo droids and machine droids are separate:
 - repo droids: `<workspace>/.factory/droids`
