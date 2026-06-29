@@ -91,6 +91,11 @@ function factoryControlBridge(): Plugin {
             return;
           }
 
+          if (req.method === "POST" && url.pathname === "/probe-droid") {
+            writeJson(await execGateway(["gui-probe-droid"]));
+            return;
+          }
+
           if (req.method === "POST" && url.pathname === "/sync-factory") {
             writeJson(await execGateway(["gui-sync-factory"]));
             return;

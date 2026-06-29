@@ -50,6 +50,8 @@ export async function call<T>(
       throw new Error("Codex sign-in from the GUI requires the desktop app.");
     case "probe_generation":
       return fetchBridge<T>("/probe-generation", { method: "POST" });
+    case "probe_droid":
+      return fetchBridge<T>("/probe-droid", { method: "POST" });
     case "sync_factory":
       return fetchBridge<T>("/sync-factory", { method: "POST" });
     case "set_droid_model":

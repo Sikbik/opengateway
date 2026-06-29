@@ -1,5 +1,6 @@
 mod auth_store;
 mod droid_files;
+mod droid_smoke;
 mod factory_config;
 mod factory_desktop;
 mod generation_probe;
@@ -76,6 +77,8 @@ enum Commands {
     SelfTest(SelfTestArgs),
     #[command(name = "probe-generation")]
     ProbeGeneration(ProbeGenerationArgs),
+    #[command(name = "probe-droid")]
+    ProbeDroid,
     FactoryConfig(FactoryConfigArgs),
     Doctor(DoctorArgs),
     #[command(name = "gui-snapshot", hide = true)]
@@ -92,6 +95,8 @@ enum Commands {
     GuiLogin,
     #[command(name = "gui-probe-generation", hide = true)]
     GuiProbeGeneration,
+    #[command(name = "gui-probe-droid", hide = true)]
+    GuiProbeDroid,
     #[command(name = "gui-sync-factory", hide = true)]
     GuiSyncFactory,
     #[command(name = "gui-set-droid-model", hide = true)]
@@ -440,6 +445,7 @@ fn run_cli() -> Result<()> {
         Commands::ShowKey(args) => command_show_key(args),
         Commands::SelfTest(args) => command_self_test(args),
         Commands::ProbeGeneration(args) => command_probe_generation(args),
+        Commands::ProbeDroid => command_probe_droid(),
         Commands::FactoryConfig(args) => command_factory_config(args),
         Commands::Doctor(args) => command_doctor(args),
         Commands::GuiSnapshot => gui_api::print_snapshot_json(),
@@ -449,6 +455,7 @@ fn run_cli() -> Result<()> {
         Commands::GuiDoctor => gui_api::print_command_result_json(&["doctor"]),
         Commands::GuiLogin => gui_api::print_login_json(),
         Commands::GuiProbeGeneration => gui_api::print_command_result_json(&["probe-generation"]),
+        Commands::GuiProbeDroid => gui_api::print_factory_droid_smoke_json(),
         Commands::GuiSyncFactory => gui_api::print_command_result_json(&["sync-factory"]),
         Commands::GuiSetDroidModel(args) => {
             gui_api::print_droid_model_update_json(&args.path, &args.model)
@@ -1247,6 +1254,11 @@ fn command_probe_generation(args: ProbeGenerationArgs) -> Result<()> {
     })?;
 
     println!("{output}");
+    Ok(())
+}
+
+fn command_probe_droid() -> Result<()> {
+    println!("{}", gui_api::run_factory_droid_smoke_text()?);
     Ok(())
 }
 

@@ -143,6 +143,48 @@ pub fn print_login_json() -> Result<()> {
     print_command_result_json(&gui_login_command_args())
 }
 
+pub fn print_factory_droid_smoke_json() -> Result<()> {
+    let output = run_factory_droid_smoke_text()?;
+    println!(
+        "{}",
+        serde_json::to_string(&CommandResult {
+            success: true,
+            output
+        })
+        .context("failed to encode Droid smoke result")?
+    );
+    Ok(())
+}
+
+pub fn run_factory_droid_smoke_text() -> Result<String> {
+    let factory_paths = build_factory_paths()?;
+    let factory = read_factory_snapshot(&factory_paths);
+    let model = factory.session_default_model.ok_or_else(|| {
+        anyhow!("Factory session default model is not set; run `opengateway sync-factory` first")
+    })?;
+    let workspace = detect_workspace_root()
+        .ok_or_else(|| anyhow!("could not resolve the current workspace path"))?;
+    let factory_desktop = crate::factory_desktop::probe_factory_desktop();
+    let executable = factory_desktop
+        .bundled_droid_path
+        .map(PathBuf::from)
+        .ok_or_else(|| {
+            anyhow!(
+                "{}",
+                factory_desktop.issue.unwrap_or_else(|| {
+                    "Factory Desktop bundled Droid executable was not found".to_string()
+                })
+            )
+        })?;
+    let result = crate::droid_smoke::run_factory_droid_smoke(
+        &factory_paths.home_dir,
+        &executable,
+        &workspace,
+        &model,
+    )?;
+    Ok(crate::droid_smoke::format_droid_smoke_result(&result))
+}
+
 pub fn print_droid_model_update_json(path: &Path, model: &str) -> Result<()> {
     let factory_paths = build_factory_paths()?;
     let workspace_droids_dir =

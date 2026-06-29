@@ -25,6 +25,7 @@ fn main() {
             control::run_doctor,
             control::run_login,
             control::probe_generation,
+            control::probe_droid,
             control::sync_factory,
             control::set_droid_model,
         ])

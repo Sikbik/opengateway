@@ -101,6 +101,11 @@ pub async fn probe_generation(app: AppHandle) -> Result<CommandResult, String> {
 }
 
 #[tauri::command]
+pub async fn probe_droid(app: AppHandle) -> Result<CommandResult, String> {
+    run_json_command(&app, &["gui-probe-droid"]).await
+}
+
+#[tauri::command]
 pub async fn sync_factory(app: AppHandle) -> Result<CommandResult, String> {
     run_json_command(&app, &["gui-sync-factory"]).await
 }

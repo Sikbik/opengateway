@@ -352,6 +352,7 @@ function App() {
   const [logs, setLogs] = useState<string[]>([]);
   const [doctorOutput, setDoctorOutput] = useState("");
   const [generationOutput, setGenerationOutput] = useState("");
+  const [droidSmokeOutput, setDroidSmokeOutput] = useState("");
   const [authOutput, setAuthOutput] = useState("");
   const [factorySyncOutput, setFactorySyncOutput] = useState("");
   const [activeTab, setActiveTab] = useState<TabKey>("dashboard");
@@ -490,6 +491,14 @@ function App() {
       "probe-generation",
       () => call<CommandResult>("probe_generation"),
       (result) => setGenerationOutput((result as CommandResult).output.trim()),
+    );
+  }
+
+  async function handleDroidProbe() {
+    await runAction(
+      "probe-droid",
+      () => call<CommandResult>("probe_droid"),
+      (result) => setDroidSmokeOutput((result as CommandResult).output.trim()),
     );
   }
 
@@ -1081,6 +1090,20 @@ function App() {
                       ? "Probing..."
                       : "Probe Generation"}
                   </button>
+                  <button
+                    className="button button--accent"
+                    onClick={() => void handleDroidProbe()}
+                    disabled={
+                      busyAction !== null ||
+                      !snapshot?.gateway.running ||
+                      !snapshot?.workspacePath ||
+                      Boolean(snapshot?.nativeHarness.droid.issue)
+                    }
+                  >
+                    {busyAction === "probe-droid"
+                      ? "Probing..."
+                      : "Probe Droid"}
+                  </button>
                   <HelpTip
                     label="Run Doctor"
                     text="Runs the built-in health sweep so you can see config drift, auth issues, and runtime problems."
@@ -1094,6 +1117,9 @@ function App() {
               </pre>
               <pre className="log-block log-block--compact">
                 {generationOutput || "No generation probe yet."}
+              </pre>
+              <pre className="log-block log-block--compact">
+                {droidSmokeOutput || "No Droid probe yet."}
               </pre>
             </article>
           </div>
