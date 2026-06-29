@@ -926,20 +926,11 @@ fn resolve_background_executable(paths: &AppPaths) -> Result<PathBuf> {
 }
 
 #[cfg(windows)]
-fn spawn_background_gateway(mut command: Command, log_file: &Path) -> Result<Option<Child>> {
-    let log_handle = fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(log_file)
-        .with_context(|| format!("failed to open log file {}", log_file.display()))?;
-    let err_handle = log_handle
-        .try_clone()
-        .context("failed to clone log handle")?;
-
+fn spawn_background_gateway(mut command: Command, _log_file: &Path) -> Result<Option<Child>> {
     command
         .stdin(Stdio::null())
-        .stdout(Stdio::from(log_handle))
-        .stderr(Stdio::from(err_handle));
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
     configure_background_command(&mut command);
 
     let child = command
