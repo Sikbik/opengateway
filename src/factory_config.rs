@@ -37,6 +37,40 @@ const DEFAULT_OPENAI_MODEL_CATALOG: [(&str, &str); 26] = [
     ("gpt-5(high)", "GPT-5 (High)"),
 ];
 
+#[derive(Debug)]
+pub struct FactorySyncResult {
+    pub legacy_added: usize,
+    pub legacy_updated: usize,
+    pub legacy_backup: Option<PathBuf>,
+    pub settings_added: usize,
+    pub settings_updated: usize,
+    pub settings_backup: Option<PathBuf>,
+    pub defaults_updated: bool,
+}
+
+pub fn sync_factory_files(
+    config_path: &Path,
+    settings_path: &Path,
+    base_url: &str,
+    api_key: &str,
+    model_ids: &[String],
+) -> Result<FactorySyncResult> {
+    let (legacy_added, legacy_updated, legacy_backup) =
+        merge_factory_config(config_path, base_url, api_key, model_ids)?;
+    let (settings_added, settings_updated, settings_backup, defaults_updated) =
+        merge_factory_settings(settings_path, base_url, api_key, model_ids)?;
+
+    Ok(FactorySyncResult {
+        legacy_added,
+        legacy_updated,
+        legacy_backup,
+        settings_added,
+        settings_updated,
+        settings_backup,
+        defaults_updated,
+    })
+}
+
 pub fn resolve_model_ids(explicit_models: &str) -> Vec<String> {
     let explicit_models = explicit_models.trim();
     if !explicit_models.is_empty() {
@@ -633,6 +667,41 @@ mod tests {
         assert!(config.contains("\"custom_models\""));
         assert!(settings.contains("\"customModels\""));
         assert!(settings.contains("\"sessionDefaultSettings\""));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn sync_factory_files_updates_legacy_config_and_settings() {
+        let root = std::env::temp_dir().join(format!(
+            "opengateway-factory-sync-files-{}",
+            epoch_seconds()
+        ));
+        let _ = fs::remove_dir_all(&root);
+
+        let config_path = root.join("config.json");
+        let settings_path = root.join("settings.json");
+        let models = vec!["gpt-5.4(xhigh)".to_string()];
+
+        let result = sync_factory_files(
+            &config_path,
+            &settings_path,
+            "http://127.0.0.1:42069",
+            "opengateway-local",
+            &models,
+        )
+        .expect("factory sync should succeed");
+
+        assert_eq!((result.legacy_added, result.legacy_updated), (1, 0));
+        assert_eq!((result.settings_added, result.settings_updated), (1, 0));
+        assert!(result.legacy_backup.is_none());
+        assert!(result.settings_backup.is_none());
+        assert!(result.defaults_updated);
+
+        let config = fs::read_to_string(&config_path).expect("legacy config should be written");
+        let settings = fs::read_to_string(&settings_path).expect("settings should be written");
+        assert!(config.contains("\"custom_models\""));
+        assert!(settings.contains("\"customModels\""));
 
         let _ = fs::remove_dir_all(&root);
     }

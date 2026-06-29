@@ -14,7 +14,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
 use clap::{Parser, Subcommand, ValueEnum};
 use factory_config::{
-    build_factory_config, merge_factory_config, merge_factory_settings, resolve_model_ids,
+    build_factory_config, resolve_model_ids, sync_factory_files, FactorySyncResult,
 };
 use oauth::LoginMode;
 use paths::{build_paths, AppPaths};
@@ -650,37 +650,15 @@ fn command_setup(args: SetupArgs) -> Result<()> {
     };
     let model_ids = resolve_model_ids(&args.models);
     let factory_path = resolve_factory_config_path(args.factory_config.as_ref())?;
-    let (added, updated, backup) = merge_factory_config(
+    let factory_settings_path = resolve_factory_settings_path(None)?;
+    let result = sync_factory_files(
         &factory_path,
+        &factory_settings_path,
         base_url.trim_end_matches('/'),
         &api_key,
         &model_ids,
     )?;
-    println!("Legacy config updated: {}", factory_path.display());
-    println!("Legacy custom models added: {added}, updated: {updated}");
-    if let Some(backup_path) = backup {
-        println!("Legacy config backup saved: {}", backup_path.display());
-    }
-
-    let factory_settings_path = resolve_factory_settings_path(None)?;
-    let (settings_added, settings_updated, settings_backup, defaults_updated) =
-        merge_factory_settings(
-            &factory_settings_path,
-            base_url.trim_end_matches('/'),
-            &api_key,
-            &model_ids,
-        )?;
-    println!(
-        "Factory settings updated: {}",
-        factory_settings_path.display()
-    );
-    println!("Factory custom models added: {settings_added}, updated: {settings_updated}");
-    if defaults_updated {
-        println!("Factory session and mission defaults now point to GPT-5.4 (XHigh).");
-    }
-    if let Some(backup_path) = settings_backup {
-        println!("Factory settings backup saved: {}", backup_path.display());
-    }
+    print_factory_sync_result(&factory_path, &factory_settings_path, &result);
 
     println!("Step 5/5: Complete.");
     println!("Ready to use.");
@@ -705,38 +683,45 @@ fn command_sync_factory(args: SyncFactoryArgs) -> Result<()> {
     let factory_path = resolve_factory_config_path(args.factory_config.as_ref())?;
     let factory_settings_path = resolve_factory_settings_path(args.factory_settings.as_ref())?;
 
-    let (added, updated, backup) = merge_factory_config(
+    let result = sync_factory_files(
         &factory_path,
+        &factory_settings_path,
         base_url.trim_end_matches('/'),
         &api_key,
         &model_ids,
     )?;
+    print_factory_sync_result(&factory_path, &factory_settings_path, &result);
+
+    Ok(())
+}
+
+fn print_factory_sync_result(
+    factory_path: &Path,
+    factory_settings_path: &Path,
+    result: &FactorySyncResult,
+) {
     println!("Legacy config updated: {}", factory_path.display());
-    println!("Legacy custom models added: {added}, updated: {updated}");
-    if let Some(backup_path) = backup {
+    println!(
+        "Legacy custom models added: {}, updated: {}",
+        result.legacy_added, result.legacy_updated
+    );
+    if let Some(backup_path) = &result.legacy_backup {
         println!("Legacy config backup saved: {}", backup_path.display());
     }
-
-    let (settings_added, settings_updated, settings_backup, defaults_updated) =
-        merge_factory_settings(
-            &factory_settings_path,
-            base_url.trim_end_matches('/'),
-            &api_key,
-            &model_ids,
-        )?;
     println!(
         "Factory settings updated: {}",
         factory_settings_path.display()
     );
-    println!("Factory custom models added: {settings_added}, updated: {settings_updated}");
-    if defaults_updated {
+    println!(
+        "Factory custom models added: {}, updated: {}",
+        result.settings_added, result.settings_updated
+    );
+    if result.defaults_updated {
         println!("Factory session and mission defaults now point to GPT-5.4 (XHigh).");
     }
-    if let Some(backup_path) = settings_backup {
+    if let Some(backup_path) = &result.settings_backup {
         println!("Factory settings backup saved: {}", backup_path.display());
     }
-
-    Ok(())
 }
 
 fn command_start(args: StartArgs) -> Result<()> {
