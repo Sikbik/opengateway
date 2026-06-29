@@ -44,6 +44,7 @@ pub fn run_probe(config: ProbeConfig<'_>) -> Result<String> {
 
     let payload: Value =
         serde_json::from_str(&body).context("failed to decode generation probe response")?;
+    let upstream_model = extract_response_model(&payload);
     let output = extract_response_output_text(&payload)
         .ok_or_else(|| anyhow!("generation probe completed but response text was empty"))?;
 
@@ -51,6 +52,7 @@ pub fn run_probe(config: ProbeConfig<'_>) -> Result<String> {
         config.host,
         config.port,
         config.model,
+        upstream_model.as_deref(),
         output.as_str(),
     ))
 }
@@ -138,9 +140,27 @@ fn extract_response_output_text(response: &Value) -> Option<String> {
     }
 }
 
-fn success_summary(host: &str, port: u16, model: &str, output: &str) -> String {
+fn extract_response_model(response: &Value) -> Option<String> {
+    response
+        .get("model")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn success_summary(
+    host: &str,
+    port: u16,
+    model: &str,
+    upstream_model: Option<&str>,
+    output: &str,
+) -> String {
+    let upstream_model = upstream_model
+        .map(|model| format!(" - upstream model: {model}"))
+        .unwrap_or_default();
     format!(
-        "Generation probe passed on {host}:{port}. - model: {model} - /v1/responses: ok - output: {}",
+        "Generation probe passed on {host}:{port}. - model: {model}{upstream_model} - /v1/responses: ok - output: {}",
         compact_text(output, 160)
     )
 }
@@ -195,6 +215,18 @@ mod tests {
     }
 
     #[test]
+    fn extracts_response_model() {
+        let response = json!({
+            "model": "gpt-5.5"
+        });
+
+        assert_eq!(
+            extract_response_model(&response).as_deref(),
+            Some("gpt-5.5")
+        );
+    }
+
+    #[test]
     fn resolves_factory_session_default_model() {
         let settings = json!({
             "sessionDefaultSettings": {
@@ -214,11 +246,13 @@ mod tests {
             "127.0.0.1",
             42069,
             "custom:GPT-5.4-(XHigh)-4",
+            Some("gpt-5.4"),
             "ok\nwith extra words",
         );
 
         assert!(summary.contains("Generation probe passed on 127.0.0.1:42069."));
         assert!(summary.contains("- model: custom:GPT-5.4-(XHigh)-4"));
+        assert!(summary.contains("- upstream model: gpt-5.4"));
         assert!(summary.contains("- /v1/responses: ok"));
         assert!(summary.contains("- output: ok with extra words"));
         assert!(!summary.contains('\n'));

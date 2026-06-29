@@ -5,10 +5,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const FACTORY_PREFERRED_MODEL: &str = "gpt-5.4(xhigh)";
+const FACTORY_PREFERRED_MODEL: &str = "gpt-5.5";
 const FACTORY_PREFERRED_REASONING_EFFORT: &str = "xhigh";
 const FACTORY_DEFAULT_MAX_OUTPUT_TOKENS: u64 = 16_384;
-const DEFAULT_OPENAI_MODEL_CATALOG: [(&str, &str); 26] = [
+const DEFAULT_OPENAI_MODEL_CATALOG: [(&str, &str); 27] = [
     ("gpt-5.4", "GPT-5.4"),
     ("gpt-5.4(low)", "GPT-5.4 (Low)"),
     ("gpt-5.4(medium)", "GPT-5.4 (Medium)"),
@@ -35,6 +35,7 @@ const DEFAULT_OPENAI_MODEL_CATALOG: [(&str, &str); 26] = [
     ("gpt-5.1(high)", "GPT-5.1 (High)"),
     ("gpt-5", "GPT-5"),
     ("gpt-5(high)", "GPT-5 (High)"),
+    ("gpt-5.5", "GPT-5.5"),
 ];
 
 #[derive(Debug)]
@@ -357,22 +358,10 @@ fn merge_factory_settings_models(
     let mut updated = 0;
     let mut preferred_model_id = None;
 
-    for model_id in model_ids {
+    for (desired_index, model_id) in model_ids.iter().enumerate() {
         if let Some(index) = index_by_model.get(model_id).copied() {
-            let mut replacement = build_factory_settings_model(model_id, base_url, api_key, index);
-            if let (Some(existing), Some(replacement_object)) = (
-                current_models[index].as_object(),
-                replacement.as_object_mut(),
-            ) {
-                if let Some(existing_id) = existing.get("id").and_then(Value::as_str) {
-                    replacement_object
-                        .insert("id".to_string(), Value::String(existing_id.to_string()));
-                }
-                if let Some(existing_index) = existing.get("index").and_then(Value::as_u64) {
-                    replacement_object
-                        .insert("index".to_string(), Value::Number(existing_index.into()));
-                }
-            }
+            let replacement =
+                build_factory_settings_model(model_id, base_url, api_key, desired_index);
             if model_id == FACTORY_PREFERRED_MODEL {
                 preferred_model_id = replacement
                     .get("id")
@@ -382,12 +371,11 @@ fn merge_factory_settings_models(
             current_models[index] = replacement;
             updated += 1;
         } else {
-            let index = current_models.len();
-            let model = build_factory_settings_model(model_id, base_url, api_key, index);
+            let model = build_factory_settings_model(model_id, base_url, api_key, desired_index);
             if model_id == FACTORY_PREFERRED_MODEL {
                 preferred_model_id = model.get("id").and_then(Value::as_str).map(str::to_string);
             }
-            index_by_model.insert(model_id.to_string(), index);
+            index_by_model.insert(model_id.to_string(), current_models.len());
             current_models.push(model);
             added += 1;
         }
@@ -548,6 +536,92 @@ mod tests {
     }
 
     #[test]
+    fn default_catalog_includes_gpt_5_5() {
+        let models = resolve_model_ids("");
+
+        assert!(models.contains(&"gpt-5.5".to_string()));
+        assert_eq!(model_display_name("gpt-5.5"), "GPT-5.5");
+    }
+
+    #[test]
+    fn default_catalog_does_not_shift_existing_factory_model_ids() {
+        let models = resolve_model_ids("");
+        let (settings, _, _, _) = merge_factory_settings_document(
+            json!({}),
+            "http://127.0.0.1:42069",
+            "opengateway-local",
+            &models,
+        )
+        .expect("settings merge should succeed");
+
+        assert_eq!(
+            factory_model_id_for_model(&settings, "gpt-5.4").as_deref(),
+            Some("custom:GPT-5.4-0")
+        );
+        assert_eq!(
+            factory_model_id_for_model(&settings, "gpt-5.4(xhigh)").as_deref(),
+            Some("custom:GPT-5.4-(XHigh)-4")
+        );
+        assert_eq!(
+            factory_model_id_for_model(&settings, "gpt-5.5").as_deref(),
+            Some("custom:GPT-5.5-26")
+        );
+    }
+
+    #[test]
+    fn repairs_shifted_managed_model_ids_and_defaults() {
+        let existing = json!({
+            "customModels": [
+                {
+                    "model": "gpt-5.5",
+                    "id": "custom:GPT-5.5-0",
+                    "index": 0,
+                    "baseUrl": "http://127.0.0.1:42069/v1",
+                    "apiKey": "secret",
+                    "displayName": "GPT-5.5",
+                    "provider": "openai"
+                },
+                {
+                    "model": "gpt-5.4(xhigh)",
+                    "id": "custom:GPT-5.4-(XHigh)-5",
+                    "index": 5,
+                    "baseUrl": "http://127.0.0.1:42069/v1",
+                    "apiKey": "secret",
+                    "displayName": "GPT-5.4 (XHigh)",
+                    "provider": "openai"
+                }
+            ],
+            "sessionDefaultSettings": {
+                "model": "custom:GPT-5.5-0",
+                "reasoningEffort": "xhigh"
+            }
+        });
+
+        let models = resolve_model_ids("");
+        let (settings, _, _, defaults_updated) =
+            merge_factory_settings_document(existing, "http://127.0.0.1:42069", "secret", &models)
+                .expect("settings merge should succeed");
+
+        assert!(defaults_updated);
+        assert_eq!(
+            factory_model_id_for_model(&settings, "gpt-5.4(xhigh)").as_deref(),
+            Some("custom:GPT-5.4-(XHigh)-4")
+        );
+        assert_eq!(
+            factory_model_id_for_model(&settings, "gpt-5.5").as_deref(),
+            Some("custom:GPT-5.5-26")
+        );
+        assert_eq!(
+            settings
+                .get("sessionDefaultSettings")
+                .and_then(Value::as_object)
+                .and_then(|settings| settings.get("model"))
+                .and_then(Value::as_str),
+            Some("custom:GPT-5.5-26")
+        );
+    }
+
+    #[test]
     fn merges_factory_settings_and_upgrades_managed_defaults() {
         let existing = json!({
             "customModels": [
@@ -576,10 +650,7 @@ mod tests {
             }
         });
 
-        let model_ids = vec![
-            "gpt-5.3-codex(xhigh)".to_string(),
-            "gpt-5.4(xhigh)".to_string(),
-        ];
+        let model_ids = vec!["gpt-5.3-codex(xhigh)".to_string(), "gpt-5.5".to_string()];
 
         let (merged, added, updated, defaults_updated) = merge_factory_settings_document(
             existing,
@@ -599,8 +670,8 @@ mod tests {
             .expect("customModels should be an array");
         let preferred_model = custom_models
             .iter()
-            .find(|entry| entry.get("model").and_then(Value::as_str) == Some("gpt-5.4(xhigh)"))
-            .expect("gpt-5.4(xhigh) should be present");
+            .find(|entry| entry.get("model").and_then(Value::as_str) == Some("gpt-5.5"))
+            .expect("gpt-5.5 should be present");
         let preferred_model_id = preferred_model
             .get("id")
             .and_then(Value::as_str)
@@ -638,7 +709,7 @@ mod tests {
 
         let config_path = root.join("config.json");
         let settings_path = root.join("settings.json");
-        let models = vec!["gpt-5.4(xhigh)".to_string()];
+        let models = vec!["gpt-5.5".to_string()];
 
         let (config_added, config_updated, config_backup) = merge_factory_config(
             &config_path,
@@ -681,7 +752,7 @@ mod tests {
 
         let config_path = root.join("config.json");
         let settings_path = root.join("settings.json");
-        let models = vec!["gpt-5.4(xhigh)".to_string()];
+        let models = vec!["gpt-5.5".to_string()];
 
         let result = sync_factory_files(
             &config_path,
@@ -704,5 +775,58 @@ mod tests {
         assert!(settings.contains("\"customModels\""));
 
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn first_run_defaults_to_gpt_5_5_with_xhigh_reasoning() {
+        let models = resolve_model_ids("");
+        let (settings, _, _, defaults_updated) = merge_factory_settings_document(
+            json!({}),
+            "http://127.0.0.1:42069",
+            "opengateway-local",
+            &models,
+        )
+        .expect("settings merge should succeed");
+        let custom_models = settings
+            .get("customModels")
+            .and_then(Value::as_array)
+            .expect("customModels should be an array");
+        let preferred_model = custom_models
+            .iter()
+            .find(|entry| entry.get("model").and_then(Value::as_str) == Some("gpt-5.5"))
+            .expect("gpt-5.5 should be present");
+        let preferred_model_id = preferred_model
+            .get("id")
+            .and_then(Value::as_str)
+            .expect("preferred custom model should have an id");
+
+        assert!(defaults_updated);
+        assert_eq!(
+            settings
+                .get("sessionDefaultSettings")
+                .and_then(Value::as_object)
+                .and_then(|settings| settings.get("model"))
+                .and_then(Value::as_str),
+            Some(preferred_model_id)
+        );
+        assert_eq!(
+            settings
+                .get("sessionDefaultSettings")
+                .and_then(Value::as_object)
+                .and_then(|settings| settings.get("reasoningEffort"))
+                .and_then(Value::as_str),
+            Some("xhigh")
+        );
+    }
+
+    fn factory_model_id_for_model(settings: &Value, model_id: &str) -> Option<String> {
+        settings
+            .get("customModels")
+            .and_then(Value::as_array)?
+            .iter()
+            .find(|entry| entry.get("model").and_then(Value::as_str) == Some(model_id))?
+            .get("id")
+            .and_then(Value::as_str)
+            .map(str::to_string)
     }
 }

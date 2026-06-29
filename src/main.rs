@@ -748,7 +748,9 @@ fn print_factory_sync_result(
         result.settings_added, result.settings_updated
     );
     if result.defaults_updated {
-        println!("Factory session and mission defaults now point to GPT-5.4 (XHigh).");
+        println!(
+            "Factory session and mission defaults now point to GPT-5.5 with Extra High reasoning."
+        );
     }
     if let Some(backup_path) = &result.settings_backup {
         println!("Factory settings backup saved: {}", backup_path.display());
