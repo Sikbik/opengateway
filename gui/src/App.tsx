@@ -351,6 +351,7 @@ function App() {
   const [snapshot, setSnapshot] = useState<AppSnapshot | null>(null);
   const [logs, setLogs] = useState<string[]>([]);
   const [doctorOutput, setDoctorOutput] = useState("");
+  const [factorySyncOutput, setFactorySyncOutput] = useState("");
   const [activeTab, setActiveTab] = useState<TabKey>("dashboard");
   const [selectedModels, setSelectedModels] = useState<Record<string, string>>(
     {},
@@ -471,6 +472,14 @@ function App() {
       "doctor",
       () => call<CommandResult>("run_doctor"),
       (result) => setDoctorOutput((result as CommandResult).output.trim()),
+    );
+  }
+
+  async function handleFactorySync() {
+    await runAction(
+      "sync:manual",
+      () => call<CommandResult>("sync_factory"),
+      (result) => setFactorySyncOutput((result as CommandResult).output.trim()),
     );
   }
 
@@ -1338,8 +1347,21 @@ function App() {
         >
           <div className="factory-grid">
             <article className="panel factory-card factory-card--wide">
-              <p className="eyebrow">Factory Blueprint</p>
-              <h2>Config and settings anchors</h2>
+              <div className="panel-heading panel-heading--tight">
+                <div>
+                  <p className="eyebrow">Factory Blueprint</p>
+                  <h2>Config and settings anchors</h2>
+                </div>
+                <button
+                  className="button button--accent"
+                  onClick={() => void handleFactorySync()}
+                  disabled={busyAction !== null}
+                >
+                  {busyAction === "sync:manual"
+                    ? "Configuring..."
+                    : "Configure Factory"}
+                </button>
+              </div>
               <dl className="fact-list">
                 <div>
                   <dt>Factory home</dt>
@@ -1366,6 +1388,11 @@ function App() {
                   <dd>{snapshot?.factory.settingsCustomModelCount ?? 0}</dd>
                 </div>
               </dl>
+              {factorySyncOutput ? (
+                <pre className="log-block log-block--compact">
+                  {factorySyncOutput}
+                </pre>
+              ) : null}
             </article>
 
             <article className="panel factory-card">
