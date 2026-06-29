@@ -24,11 +24,13 @@ use paths::{build_paths, AppPaths};
 use reqwest::blocking::Client;
 use std::collections::VecDeque;
 #[cfg(windows)]
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
+#[cfg(windows)]
+use std::os::windows::ffi::OsStrExt;
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -933,10 +935,151 @@ fn spawn_background_gateway(mut command: Command, _log_file: &Path) -> Result<Op
         .stderr(Stdio::null());
     configure_background_command(&mut command);
 
-    let child = command
-        .spawn()
-        .context("failed to start background process")?;
-    Ok(Some(child))
+    spawn_windows_detached(command)?;
+    Ok(None)
+}
+
+#[cfg(windows)]
+fn spawn_windows_detached(command: Command) -> Result<()> {
+    let program = command.get_program().to_owned();
+    let args = command
+        .get_args()
+        .map(|value| value.to_owned())
+        .collect::<Vec<_>>();
+    let command_line = windows_command_line(program.as_os_str(), &args);
+
+    let mut application_name = wide_null(program.as_os_str());
+    let mut command_line = command_line
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let mut startup_info = StartupInfoW {
+        cb: std::mem::size_of::<StartupInfoW>() as u32,
+        ..unsafe { std::mem::zeroed() }
+    };
+    let mut process_info = unsafe { std::mem::zeroed::<ProcessInformation>() };
+
+    let created = unsafe {
+        CreateProcessW(
+            application_name.as_mut_ptr(),
+            command_line.as_mut_ptr(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            0,
+            CREATE_NO_WINDOW | DETACHED_PROCESS,
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            &mut startup_info,
+            &mut process_info,
+        )
+    };
+
+    if created == 0 {
+        return Err(std::io::Error::last_os_error()).context("failed to start background process");
+    }
+
+    unsafe {
+        CloseHandle(process_info.h_thread);
+        CloseHandle(process_info.h_process);
+    }
+
+    Ok(())
+}
+
+#[cfg(windows)]
+fn windows_command_line(program: &OsStr, args: &[OsString]) -> String {
+    let mut parts = Vec::with_capacity(args.len() + 1);
+    parts.push(windows_quote_arg(program));
+    parts.extend(args.iter().map(|arg| windows_quote_arg(arg.as_os_str())));
+    parts.join(" ")
+}
+
+#[cfg(windows)]
+fn windows_quote_arg(value: &OsStr) -> String {
+    let raw = value.to_string_lossy();
+    if raw.is_empty() {
+        return "\"\"".to_string();
+    }
+    if !raw.chars().any(|ch| matches!(ch, ' ' | '\t' | '"')) {
+        return raw.into_owned();
+    }
+
+    let mut quoted = String::from("\"");
+    let mut backslashes = 0;
+    for ch in raw.chars() {
+        match ch {
+            '\\' => backslashes += 1,
+            '"' => {
+                quoted.push_str(&"\\".repeat(backslashes * 2 + 1));
+                quoted.push('"');
+                backslashes = 0;
+            }
+            _ => {
+                quoted.push_str(&"\\".repeat(backslashes));
+                backslashes = 0;
+                quoted.push(ch);
+            }
+        }
+    }
+    quoted.push_str(&"\\".repeat(backslashes * 2));
+    quoted.push('"');
+    quoted
+}
+
+#[cfg(windows)]
+fn wide_null(value: &OsStr) -> Vec<u16> {
+    value.encode_wide().chain(std::iter::once(0)).collect()
+}
+
+#[cfg(windows)]
+#[repr(C)]
+struct StartupInfoW {
+    cb: u32,
+    lp_reserved: *mut u16,
+    lp_desktop: *mut u16,
+    lp_title: *mut u16,
+    dw_x: u32,
+    dw_y: u32,
+    dw_x_size: u32,
+    dw_y_size: u32,
+    dw_x_count_chars: u32,
+    dw_y_count_chars: u32,
+    dw_fill_attribute: u32,
+    dw_flags: u32,
+    w_show_window: u16,
+    cb_reserved2: u16,
+    lp_reserved2: *mut u8,
+    h_std_input: *mut std::ffi::c_void,
+    h_std_output: *mut std::ffi::c_void,
+    h_std_error: *mut std::ffi::c_void,
+}
+
+#[cfg(windows)]
+#[repr(C)]
+struct ProcessInformation {
+    h_process: *mut std::ffi::c_void,
+    h_thread: *mut std::ffi::c_void,
+    dw_process_id: u32,
+    dw_thread_id: u32,
+}
+
+#[cfg(windows)]
+#[link(name = "kernel32")]
+extern "system" {
+    fn CreateProcessW(
+        lp_application_name: *const u16,
+        lp_command_line: *mut u16,
+        lp_process_attributes: *mut std::ffi::c_void,
+        lp_thread_attributes: *mut std::ffi::c_void,
+        b_inherit_handles: i32,
+        dw_creation_flags: u32,
+        lp_environment: *mut std::ffi::c_void,
+        lp_current_directory: *const u16,
+        lp_startup_info: *mut StartupInfoW,
+        lp_process_information: *mut ProcessInformation,
+    ) -> i32;
+
+    fn CloseHandle(h_object: *mut std::ffi::c_void) -> i32;
 }
 
 #[cfg(unix)]
