@@ -1616,7 +1616,7 @@ fn send_signal(pid: i32, signal: &str) -> Result<()> {
         let mut command = windows_system_command("taskkill");
         hidden_command(&mut command);
         command.arg("/PID").arg(pid.to_string()).arg("/T");
-        if signal == "-KILL" {
+        if windows_taskkill_requires_force(signal) {
             command.arg("/F");
         }
 
@@ -1650,6 +1650,23 @@ fn send_signal(pid: i32, signal: &str) -> Result<()> {
         } else {
             Err(anyhow!("kill {} {} failed", signal, pid))
         }
+    }
+}
+
+#[cfg(windows)]
+fn windows_taskkill_requires_force(signal: &str) -> bool {
+    matches!(signal, "-TERM" | "-KILL")
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::windows_taskkill_requires_force;
+
+    #[test]
+    fn windows_taskkill_forces_managed_backend_stop() {
+        assert!(windows_taskkill_requires_force("-TERM"));
+        assert!(windows_taskkill_requires_force("-KILL"));
+        assert!(!windows_taskkill_requires_force("-0"));
     }
 }
 
