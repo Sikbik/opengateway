@@ -46,6 +46,7 @@ const CREATE_NO_WINDOW: u32 = 0x08000000;
 const DETACHED_PROCESS: u32 = 0x00000008;
 const FACTORY_PREFERRED_MODEL: &str = "gpt-5.4(xhigh)";
 const FACTORY_PREFERRED_REASONING_EFFORT: &str = "xhigh";
+const FACTORY_DEFAULT_MAX_OUTPUT_TOKENS: u64 = 16_384;
 const DEFAULT_OPENAI_MODEL_CATALOG: [(&str, &str); 26] = [
     ("gpt-5.4", "GPT-5.4"),
     ("gpt-5.4(low)", "GPT-5.4 (Low)"),
@@ -1600,6 +1601,7 @@ fn build_factory_settings_model(
         "baseUrl": format!("{base_url}/v1"),
         "apiKey": api_key,
         "displayName": display_name,
+        "maxOutputTokens": FACTORY_DEFAULT_MAX_OUTPUT_TOKENS,
         "noImageSupport": false,
         "provider": "openai"
     })
@@ -2288,6 +2290,12 @@ mod tests {
             .and_then(Value::as_str)
             .expect("preferred custom model should have an id");
 
+        assert_eq!(
+            preferred_model
+                .get("maxOutputTokens")
+                .and_then(Value::as_u64),
+            Some(16_384)
+        );
         assert_eq!(
             merged
                 .get("sessionDefaultSettings")
