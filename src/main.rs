@@ -2,6 +2,7 @@ mod auth_store;
 mod droid_files;
 mod factory_config;
 mod factory_desktop;
+mod generation_probe;
 mod gui_api;
 mod oauth;
 mod paths;
@@ -73,6 +74,8 @@ enum Commands {
     Login(LoginArgs),
     ShowKey(ShowKeyArgs),
     SelfTest(SelfTestArgs),
+    #[command(name = "probe-generation")]
+    ProbeGeneration(ProbeGenerationArgs),
     FactoryConfig(FactoryConfigArgs),
     Doctor(DoctorArgs),
     #[command(name = "gui-snapshot", hide = true)]
@@ -85,6 +88,8 @@ enum Commands {
     GuiStop,
     #[command(name = "gui-doctor", hide = true)]
     GuiDoctor,
+    #[command(name = "gui-probe-generation", hide = true)]
+    GuiProbeGeneration,
     #[command(name = "gui-sync-factory", hide = true)]
     GuiSyncFactory,
     #[command(name = "gui-set-droid-model", hide = true)]
@@ -323,6 +328,20 @@ struct SelfTestArgs {
 }
 
 #[derive(Debug, clap::Args)]
+struct ProbeGenerationArgs {
+    #[arg(long, default_value = DEFAULT_FRONT_HOST)]
+    host: String,
+    #[arg(long, default_value_t = DEFAULT_FRONT_PORT)]
+    port: u16,
+    #[arg(long, default_value = "")]
+    api_key: String,
+    #[arg(long, default_value = "")]
+    model: String,
+    #[arg(long, default_value_t = 120.0)]
+    timeout: f64,
+}
+
+#[derive(Debug, clap::Args)]
 struct FactoryConfigArgs {
     #[arg(long, default_value = "http://localhost:42069")]
     base_url: String,
@@ -418,6 +437,7 @@ fn run_cli() -> Result<()> {
         Commands::Login(args) => command_login(args),
         Commands::ShowKey(args) => command_show_key(args),
         Commands::SelfTest(args) => command_self_test(args),
+        Commands::ProbeGeneration(args) => command_probe_generation(args),
         Commands::FactoryConfig(args) => command_factory_config(args),
         Commands::Doctor(args) => command_doctor(args),
         Commands::GuiSnapshot => gui_api::print_snapshot_json(),
@@ -425,6 +445,7 @@ fn run_cli() -> Result<()> {
         Commands::GuiStart => gui_api::print_command_result_json(&["start"]),
         Commands::GuiStop => gui_api::print_command_result_json(&["stop"]),
         Commands::GuiDoctor => gui_api::print_command_result_json(&["doctor"]),
+        Commands::GuiProbeGeneration => gui_api::print_command_result_json(&["probe-generation"]),
         Commands::GuiSyncFactory => gui_api::print_command_result_json(&["sync-factory"]),
         Commands::GuiSetDroidModel(args) => {
             gui_api::print_droid_model_update_json(&args.path, &args.model)
@@ -1195,6 +1216,34 @@ fn command_self_test(args: SelfTestArgs) -> Result<()> {
     println!("Self-test passed on {}:{}", args.host, args.port);
     println!("- /healthz: ok");
     println!("- /v1/models: ok");
+    Ok(())
+}
+
+fn command_probe_generation(args: ProbeGenerationArgs) -> Result<()> {
+    let paths = build_paths()?;
+    paths.ensure_runtime_dirs()?;
+
+    if !is_port_open(&args.host, args.port, Duration::from_millis(400)) {
+        return Err(anyhow!(
+            "proxy is not reachable on {}:{} (run `opengateway start` first)",
+            args.host,
+            args.port
+        ));
+    }
+
+    let api_key = resolve_proxy_api_key(&paths.api_key_file, &args.api_key)?;
+    let factory_settings_path = resolve_factory_settings_path(None)?;
+    let model = generation_probe::resolve_probe_model(&args.model, &factory_settings_path)?;
+    let timeout = Duration::from_secs_f64(args.timeout.max(0.1));
+    let output = generation_probe::run_probe(generation_probe::ProbeConfig {
+        host: &args.host,
+        port: args.port,
+        api_key: &api_key,
+        model: &model,
+        timeout,
+    })?;
+
+    println!("{output}");
     Ok(())
 }
 

@@ -351,6 +351,7 @@ function App() {
   const [snapshot, setSnapshot] = useState<AppSnapshot | null>(null);
   const [logs, setLogs] = useState<string[]>([]);
   const [doctorOutput, setDoctorOutput] = useState("");
+  const [generationOutput, setGenerationOutput] = useState("");
   const [factorySyncOutput, setFactorySyncOutput] = useState("");
   const [activeTab, setActiveTab] = useState<TabKey>("dashboard");
   const [selectedModels, setSelectedModels] = useState<Record<string, string>>(
@@ -472,6 +473,14 @@ function App() {
       "doctor",
       () => call<CommandResult>("run_doctor"),
       (result) => setDoctorOutput((result as CommandResult).output.trim()),
+    );
+  }
+
+  async function handleGenerationProbe() {
+    await runAction(
+      "probe-generation",
+      () => call<CommandResult>("probe_generation"),
+      (result) => setGenerationOutput((result as CommandResult).output.trim()),
     );
   }
 
@@ -1030,6 +1039,15 @@ function App() {
                   >
                     {busyAction === "doctor" ? "Running..." : "Run Doctor"}
                   </button>
+                  <button
+                    className="button button--accent"
+                    onClick={() => void handleGenerationProbe()}
+                    disabled={busyAction !== null || !snapshot?.gateway.running}
+                  >
+                    {busyAction === "probe-generation"
+                      ? "Probing..."
+                      : "Probe Generation"}
+                  </button>
                   <HelpTip
                     label="Run Doctor"
                     text="Runs the built-in health sweep so you can see config drift, auth issues, and runtime problems."
@@ -1040,6 +1058,9 @@ function App() {
               </div>
               <pre className="log-block log-block--compact">
                 {doctorOutput || "No doctor run yet."}
+              </pre>
+              <pre className="log-block log-block--compact">
+                {generationOutput || "No generation probe yet."}
               </pre>
             </article>
           </div>

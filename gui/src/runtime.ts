@@ -46,6 +46,8 @@ export async function call<T>(
       return fetchBridge<T>("/stop", { method: "POST" });
     case "run_doctor":
       return fetchBridge<T>("/doctor", { method: "POST" });
+    case "probe_generation":
+      return fetchBridge<T>("/probe-generation", { method: "POST" });
     case "sync_factory":
       return fetchBridge<T>("/sync-factory", { method: "POST" });
     case "set_droid_model":

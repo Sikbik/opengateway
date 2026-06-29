@@ -23,6 +23,7 @@ fn main() {
             control::start_gateway,
             control::stop_gateway,
             control::run_doctor,
+            control::probe_generation,
             control::sync_factory,
             control::set_droid_model,
         ])
