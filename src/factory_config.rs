@@ -8,34 +8,36 @@ use std::time::{SystemTime, UNIX_EPOCH};
 const FACTORY_PREFERRED_MODEL: &str = "gpt-5.5";
 const FACTORY_PREFERRED_REASONING_EFFORT: &str = "xhigh";
 const FACTORY_DEFAULT_MAX_OUTPUT_TOKENS: u64 = 16_384;
-const DEFAULT_OPENAI_MODEL_CATALOG: [(&str, &str); 27] = [
+const DEFAULT_OPENAI_MODEL_CATALOG: [(&str, &str); 13] = [
     ("gpt-5.4", "GPT-5.4"),
-    ("gpt-5.4(low)", "GPT-5.4 (Low)"),
-    ("gpt-5.4(medium)", "GPT-5.4 (Medium)"),
-    ("gpt-5.4(high)", "GPT-5.4 (High)"),
-    ("gpt-5.4(xhigh)", "GPT-5.4 (XHigh)"),
     ("gpt-5.3-codex", "GPT-5.3 Codex"),
     ("gpt-5.3-codex-spark", "GPT-5.3 Codex Spark"),
-    ("gpt-5.3-codex(high)", "GPT-5.3 Codex (High)"),
-    ("gpt-5.3-codex(xhigh)", "GPT-5.3 Codex (XHigh)"),
     ("gpt-5.2-codex", "GPT-5.2 Codex"),
-    ("gpt-5.2-codex(high)", "GPT-5.2 Codex (High)"),
-    ("gpt-5.2-codex(xhigh)", "GPT-5.2 Codex (XHigh)"),
     ("gpt-5.1-codex-max", "GPT-5.1 Codex Max"),
-    ("gpt-5.1-codex-max(high)", "GPT-5.1 Codex Max (High)"),
-    ("gpt-5.1-codex-max(xhigh)", "GPT-5.1 Codex Max (XHigh)"),
     ("gpt-5.1-codex", "GPT-5.1 Codex"),
     ("gpt-5.1-codex-mini", "GPT-5.1 Codex Mini"),
     ("gpt-5-codex", "GPT-5 Codex"),
     ("gpt-5-codex-mini", "GPT-5 Codex Mini"),
     ("gpt-5.2", "GPT-5.2"),
-    ("gpt-5.2(high)", "GPT-5.2 (High)"),
-    ("gpt-5.2(xhigh)", "GPT-5.2 (XHigh)"),
     ("gpt-5.1", "GPT-5.1"),
-    ("gpt-5.1(high)", "GPT-5.1 (High)"),
     ("gpt-5", "GPT-5"),
-    ("gpt-5(high)", "GPT-5 (High)"),
     ("gpt-5.5", "GPT-5.5"),
+];
+const DEPRECATED_REASONING_ALIAS_MODEL_IDS: [&str; 14] = [
+    "gpt-5.4(low)",
+    "gpt-5.4(medium)",
+    "gpt-5.4(high)",
+    "gpt-5.4(xhigh)",
+    "gpt-5.3-codex(high)",
+    "gpt-5.3-codex(xhigh)",
+    "gpt-5.2-codex(high)",
+    "gpt-5.2-codex(xhigh)",
+    "gpt-5.1-codex-max(high)",
+    "gpt-5.1-codex-max(xhigh)",
+    "gpt-5.2(high)",
+    "gpt-5.2(xhigh)",
+    "gpt-5.1(high)",
+    "gpt-5(high)",
 ];
 
 #[derive(Debug)]
@@ -180,6 +182,13 @@ pub fn merge_factory_config(
         .as_array_mut()
         .ok_or_else(|| anyhow!("internal error: custom_models should be array"))?;
 
+    let desired_models = model_ids.iter().map(String::as_str).collect::<HashSet<_>>();
+    let removed = prune_deprecated_reasoning_aliases_from_legacy_config(
+        current_models,
+        &desired_models,
+        base_url,
+    );
+
     let mut index_by_model: HashMap<String, usize> = HashMap::new();
     for (index, model) in current_models.iter().enumerate() {
         if let Some(name) = model.get("model").and_then(Value::as_str) {
@@ -188,7 +197,7 @@ pub fn merge_factory_config(
     }
 
     let mut added = 0;
-    let mut updated = 0;
+    let mut updated = removed;
     for model in incoming_models {
         let Some(model_name) = model.get("model").and_then(Value::as_str) else {
             continue;
@@ -351,7 +360,12 @@ fn collect_managed_factory_model_ids(
         .filter(|model| {
             model.get("provider").and_then(Value::as_str) == Some("openai")
                 && model.get("baseUrl").and_then(Value::as_str) == Some(expected_base_url.as_str())
-                && model.get("apiKey").and_then(Value::as_str) == Some(api_key)
+                && (model.get("apiKey").and_then(Value::as_str) == Some(api_key)
+                    || model
+                        .get("model")
+                        .and_then(Value::as_str)
+                        .map(is_deprecated_reasoning_alias_model_id)
+                        .unwrap_or(false))
         })
         .filter_map(|model| model.get("id").and_then(Value::as_str))
         .map(str::to_string)
@@ -364,6 +378,13 @@ fn merge_factory_settings_models(
     api_key: &str,
     model_ids: &[String],
 ) -> (usize, usize, Option<String>) {
+    let desired_models = model_ids.iter().map(String::as_str).collect::<HashSet<_>>();
+    let removed = prune_deprecated_reasoning_aliases_from_factory_settings(
+        current_models,
+        &desired_models,
+        base_url,
+    );
+
     let mut index_by_model: HashMap<String, usize> = HashMap::new();
     for (index, model) in current_models.iter().enumerate() {
         if let Some(name) = model.get("model").and_then(Value::as_str) {
@@ -372,13 +393,14 @@ fn merge_factory_settings_models(
     }
 
     let mut added = 0;
-    let mut updated = 0;
+    let mut updated = removed;
     let mut preferred_model_id = None;
 
     for (desired_index, model_id) in model_ids.iter().enumerate() {
+        let factory_index = factory_settings_model_index(model_id, desired_index);
         if let Some(index) = index_by_model.get(model_id).copied() {
             let replacement =
-                build_factory_settings_model(model_id, base_url, api_key, desired_index);
+                build_factory_settings_model(model_id, base_url, api_key, factory_index);
             if model_id == FACTORY_PREFERRED_MODEL {
                 preferred_model_id = replacement
                     .get("id")
@@ -390,7 +412,7 @@ fn merge_factory_settings_models(
                 updated += 1;
             }
         } else {
-            let model = build_factory_settings_model(model_id, base_url, api_key, desired_index);
+            let model = build_factory_settings_model(model_id, base_url, api_key, factory_index);
             if model_id == FACTORY_PREFERRED_MODEL {
                 preferred_model_id = model.get("id").and_then(Value::as_str).map(str::to_string);
             }
@@ -401,6 +423,99 @@ fn merge_factory_settings_models(
     }
 
     (added, updated, preferred_model_id)
+}
+
+fn prune_deprecated_reasoning_aliases_from_legacy_config(
+    current_models: &mut Vec<Value>,
+    desired_models: &HashSet<&str>,
+    base_url: &str,
+) -> usize {
+    let expected_base_url = format!("{base_url}/v1");
+    let before = current_models.len();
+    current_models.retain(|model| {
+        !model
+            .as_object()
+            .map(|model| {
+                model.get("provider").and_then(Value::as_str) == Some("openai")
+                    && model.get("base_url").and_then(Value::as_str)
+                        == Some(expected_base_url.as_str())
+                    && model
+                        .get("model")
+                        .and_then(Value::as_str)
+                        .map(|model_id| {
+                            is_deprecated_reasoning_alias_model_id(model_id)
+                                && !desired_models.contains(model_id)
+                        })
+                        .unwrap_or(false)
+            })
+            .unwrap_or(false)
+    });
+    before - current_models.len()
+}
+
+fn prune_deprecated_reasoning_aliases_from_factory_settings(
+    current_models: &mut Vec<Value>,
+    desired_models: &HashSet<&str>,
+    base_url: &str,
+) -> usize {
+    let expected_base_url = format!("{base_url}/v1");
+    let before = current_models.len();
+    current_models.retain(|model| {
+        !model
+            .as_object()
+            .map(|model| {
+                model.get("provider").and_then(Value::as_str) == Some("openai")
+                    && model.get("baseUrl").and_then(Value::as_str)
+                        == Some(expected_base_url.as_str())
+                    && model
+                        .get("model")
+                        .and_then(Value::as_str)
+                        .map(|model_id| {
+                            is_deprecated_reasoning_alias_model_id(model_id)
+                                && !desired_models.contains(model_id)
+                        })
+                        .unwrap_or(false)
+            })
+            .unwrap_or(false)
+    });
+    before - current_models.len()
+}
+
+fn is_deprecated_reasoning_alias_model_id(model_id: &str) -> bool {
+    DEPRECATED_REASONING_ALIAS_MODEL_IDS.contains(&model_id)
+}
+
+fn factory_settings_model_index(model_id: &str, fallback_index: usize) -> usize {
+    match model_id {
+        "gpt-5.4" => 0,
+        "gpt-5.4(low)" => 1,
+        "gpt-5.4(medium)" => 2,
+        "gpt-5.4(high)" => 3,
+        "gpt-5.4(xhigh)" => 4,
+        "gpt-5.3-codex" => 5,
+        "gpt-5.3-codex-spark" => 6,
+        "gpt-5.3-codex(high)" => 7,
+        "gpt-5.3-codex(xhigh)" => 8,
+        "gpt-5.2-codex" => 9,
+        "gpt-5.2-codex(high)" => 10,
+        "gpt-5.2-codex(xhigh)" => 11,
+        "gpt-5.1-codex-max" => 12,
+        "gpt-5.1-codex-max(high)" => 13,
+        "gpt-5.1-codex-max(xhigh)" => 14,
+        "gpt-5.1-codex" => 15,
+        "gpt-5.1-codex-mini" => 16,
+        "gpt-5-codex" => 17,
+        "gpt-5-codex-mini" => 18,
+        "gpt-5.2" => 19,
+        "gpt-5.2(high)" => 20,
+        "gpt-5.2(xhigh)" => 21,
+        "gpt-5.1" => 22,
+        "gpt-5.1(high)" => 23,
+        "gpt-5" => 24,
+        "gpt-5(high)" => 25,
+        "gpt-5.5" => 26,
+        _ => fallback_index,
+    }
 }
 
 fn update_factory_settings_defaults(
@@ -563,6 +678,13 @@ mod tests {
     }
 
     #[test]
+    fn default_catalog_uses_factory_reasoning_selector_instead_of_model_aliases() {
+        let models = resolve_model_ids("");
+
+        assert!(models.iter().all(|model| !has_reasoning_alias(model)));
+    }
+
+    #[test]
     fn default_catalog_does_not_shift_existing_factory_model_ids() {
         let models = resolve_model_ids("");
         let (settings, _, _, _) = merge_factory_settings_document(
@@ -576,10 +698,6 @@ mod tests {
         assert_eq!(
             factory_model_id_for_model(&settings, "gpt-5.4").as_deref(),
             Some("custom:GPT-5.4-0")
-        );
-        assert_eq!(
-            factory_model_id_for_model(&settings, "gpt-5.4(xhigh)").as_deref(),
-            Some("custom:GPT-5.4-(XHigh)-4")
         );
         assert_eq!(
             factory_model_id_for_model(&settings, "gpt-5.5").as_deref(),
@@ -601,12 +719,12 @@ mod tests {
                     "provider": "openai"
                 },
                 {
-                    "model": "gpt-5.4(xhigh)",
-                    "id": "custom:GPT-5.4-(XHigh)-5",
+                    "model": "gpt-5.4",
+                    "id": "custom:GPT-5.4-5",
                     "index": 5,
                     "baseUrl": "http://127.0.0.1:42069/v1",
                     "apiKey": "secret",
-                    "displayName": "GPT-5.4 (XHigh)",
+                    "displayName": "GPT-5.4",
                     "provider": "openai"
                 }
             ],
@@ -623,8 +741,8 @@ mod tests {
 
         assert!(defaults_updated);
         assert_eq!(
-            factory_model_id_for_model(&settings, "gpt-5.4(xhigh)").as_deref(),
-            Some("custom:GPT-5.4-(XHigh)-4")
+            factory_model_id_for_model(&settings, "gpt-5.4").as_deref(),
+            Some("custom:GPT-5.4-0")
         );
         assert_eq!(
             factory_model_id_for_model(&settings, "gpt-5.5").as_deref(),
@@ -638,6 +756,102 @@ mod tests {
                 .and_then(Value::as_str),
             Some("custom:GPT-5.5-26")
         );
+    }
+
+    #[test]
+    fn prunes_stale_managed_reasoning_aliases_from_settings() {
+        let existing = json!({
+            "customModels": [
+                {
+                    "model": "gpt-5.4(xhigh)",
+                    "id": "custom:GPT-5.4-(XHigh)-4",
+                    "index": 4,
+                    "baseUrl": "http://127.0.0.1:42069/v1",
+                    "apiKey": "stale-key",
+                    "displayName": "GPT-5.4 (XHigh)",
+                    "provider": "openai"
+                },
+                {
+                    "model": "gpt-5.5",
+                    "id": "custom:GPT-5.5-26",
+                    "index": 26,
+                    "baseUrl": "http://127.0.0.1:42069/v1",
+                    "apiKey": "secret",
+                    "displayName": "GPT-5.5",
+                    "provider": "openai"
+                },
+                {
+                    "model": "local-test-model",
+                    "id": "custom:Local-Test-99",
+                    "index": 99,
+                    "baseUrl": "http://127.0.0.1:42069/v1",
+                    "apiKey": "secret",
+                    "displayName": "Local Test",
+                    "provider": "openai"
+                }
+            ]
+        });
+
+        let models = resolve_model_ids("");
+        let (settings, _, updated, _) =
+            merge_factory_settings_document(existing, "http://127.0.0.1:42069", "secret", &models)
+                .expect("settings merge should succeed");
+        let configured_models = factory_models(&settings);
+
+        assert!(updated > 0);
+        assert!(!configured_models.contains(&"gpt-5.4(xhigh)".to_string()));
+        assert!(configured_models.contains(&"gpt-5.5".to_string()));
+        assert!(configured_models.contains(&"local-test-model".to_string()));
+    }
+
+    #[test]
+    fn prunes_stale_managed_reasoning_aliases_from_legacy_config() {
+        let root = std::env::temp_dir().join(format!(
+            "opengateway-factory-prune-legacy-{}-{}",
+            epoch_seconds(),
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).expect("temp root should be created");
+        let config_path = root.join("config.json");
+        fs::write(
+            &config_path,
+            serde_json::to_string_pretty(&json!({
+                "custom_models": [
+                    {
+                        "model_display_name": "GPT-5.4 (High)",
+                        "model": "gpt-5.4(high)",
+                        "base_url": "http://127.0.0.1:42069/v1",
+                        "api_key": "stale-key",
+                        "provider": "openai"
+                    },
+                    {
+                        "model_display_name": "Local Test",
+                        "model": "local-test-model",
+                        "base_url": "http://127.0.0.1:42069/v1",
+                        "api_key": "secret",
+                        "provider": "openai"
+                    }
+                ]
+            }))
+            .expect("legacy config JSON should encode"),
+        )
+        .expect("legacy config should be written");
+
+        let models = resolve_model_ids("");
+        let (_, updated, _) =
+            merge_factory_config(&config_path, "http://127.0.0.1:42069", "secret", &models)
+                .expect("legacy config merge should succeed");
+        let config = fs::read_to_string(&config_path).expect("legacy config should be readable");
+        let configured_models = legacy_config_models(
+            &serde_json::from_str::<Value>(&config).expect("legacy config should be JSON"),
+        );
+
+        assert!(updated > 0);
+        assert!(!configured_models.contains(&"gpt-5.4(high)".to_string()));
+        assert!(configured_models.contains(&"local-test-model".to_string()));
+
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -928,5 +1142,39 @@ mod tests {
             .get("id")
             .and_then(Value::as_str)
             .map(str::to_string)
+    }
+
+    fn factory_models(settings: &Value) -> Vec<String> {
+        settings
+            .get("customModels")
+            .and_then(Value::as_array)
+            .map(|models| {
+                models
+                    .iter()
+                    .filter_map(|entry| entry.get("model").and_then(Value::as_str))
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn legacy_config_models(config: &Value) -> Vec<String> {
+        config
+            .get("custom_models")
+            .and_then(Value::as_array)
+            .map(|models| {
+                models
+                    .iter()
+                    .filter_map(|entry| entry.get("model").and_then(Value::as_str))
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn has_reasoning_alias(model_id: &str) -> bool {
+        ["(low)", "(medium)", "(high)", "(xhigh)"]
+            .iter()
+            .any(|suffix| model_id.ends_with(suffix))
     }
 }
